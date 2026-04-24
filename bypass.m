@@ -66,22 +66,6 @@ __attribute__((constructor))
 static void TIXBypassInit(void) {
     NSLog(@"[TIXBypass] 插件已加载 - 卡密验证绕过模式");
 
-    // 注册 URL 拦截器（拦截所有 URLSession 请求）
+    // 注册 URL 拦截器（只拦截网络请求，不跳过卡密界面）
     [NSURLProtocol registerClass:[TIXBypassProtocol class]];
-
-    // 同时设置 UserDefaults（双保险）
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // 标准 UserDefaults
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"kami_verified"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-
-        // TIX 自定义 UserDefaults
-        NSString *tixPath = [NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES) firstObject];
-        tixPath = [tixPath stringByAppendingPathComponent:@"Preferences/com.Alfie.TrollInstallerX.plist"];
-        NSUserDefaults *tixDefaults = [[NSUserDefaults alloc] initWithSuiteName:tixPath];
-        [tixDefaults setBool:YES forKey:@"kami_verified"];
-        [tixDefaults synchronize];
-
-        NSLog(@"[TIXBypass] UserDefaults 已设置");
-    });
 }
