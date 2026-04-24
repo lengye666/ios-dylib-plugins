@@ -1,6 +1,16 @@
 name: Build TIX Bypass Dylib
 
 on:
+  push:
+    branches: [ main ]
+    paths:
+      - '*.m'
+      - '*.xm'
+      - '*.c'
+      - '*.mm'
+      - '*.swift'
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -10,20 +20,33 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # 缓存编译产物（dylib 本身）
+    - name: Cache Dylib
+      uses: actions/cache@v4
+      with:
+        path: TIXBypass.dylib
+        key: dylib-${{ hashFiles('bypass.m') }}
+
     - name: Build Dylib
       run: |
-        clang -arch arm64 -arch arm64e \
-          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -target arm64-apple-ios14.0 \
-          -shared \
-          -dynamiclib \
-          -framework Foundation \
-          -fobjc-arc \
-          -o TIXBypass.dylib \
-          bypass.m
+        if [ -f "TIXBypass.dylib" ]; then
+          echo "Dylib 已缓存，跳过编译"
+          lipo -info TIXBypass.dylib
+        else
+          echo "开始编译..."
+          clang -arch arm64 -arch arm64e \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -target arm64-apple-ios14.0 \
+            -shared \
+            -dynamiclib \
+            -framework Foundation \
+            -fobjc-arc \
+            -o TIXBypass.dylib \
+            bypass.m
 
-        lipo -info TIXBypass.dylib
-        ls -la TIXBypass.dylib
+          lipo -info TIXBypass.dylib
+          ls -la TIXBypass.dylib
+        fi
 
     - name: Upload Dylib
       uses: actions/upload-artifact@v4
