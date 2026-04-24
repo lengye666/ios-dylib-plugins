@@ -1,4 +1,4 @@
-name: Build TIX Bypass Dylib
+name: Build Dylibs
 
 on:
   push:
@@ -14,42 +14,58 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-tix:
+    name: Build TIXBypass
     runs-on: macos-latest
-
     steps:
     - uses: actions/checkout@v4
-
-    # 缓存编译产物（dylib 本身）
-    - name: Cache Dylib
+    - name: Cache
       uses: actions/cache@v4
       with:
         path: TIXBypass.dylib
-        key: dylib-${{ hashFiles('bypass.m') }}
-
-    - name: Build Dylib
+        key: tix-${{ hashFiles('bypass.m') }}
+    - name: Build
       run: |
         if [ -f "TIXBypass.dylib" ]; then
-          echo "Dylib 已缓存，跳过编译"
+          echo "缓存命中，跳过"
           lipo -info TIXBypass.dylib
         else
-          echo "开始编译..."
           clang -arch arm64 -arch arm64e \
             -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -target arm64-apple-ios14.0 \
-            -shared \
-            -dynamiclib \
-            -framework Foundation \
-            -fobjc-arc \
-            -o TIXBypass.dylib \
-            bypass.m
-
+            -shared -dynamiclib -framework Foundation \
+            -fobjc-arc -o TIXBypass.dylib bypass.m
           lipo -info TIXBypass.dylib
-          ls -la TIXBypass.dylib
         fi
-
-    - name: Upload Dylib
-      uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v4
       with:
         name: TIXBypass
         path: TIXBypass.dylib
+
+  build-kami:
+    name: Build KamiBypass (通用版)
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: KamiBypass.dylib
+        key: kami-${{ hashFiles('kami-bypass.m') }}
+    - name: Build
+      run: |
+        if [ -f "KamiBypass.dylib" ]; then
+          echo "缓存命中，跳过"
+          lipo -info KamiBypass.dylib
+        else
+          clang -arch arm64 -arch arm64e \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -target arm64-apple-ios14.0 \
+            -shared -dynamiclib -framework Foundation \
+            -fobjc-arc -o KamiBypass.dylib kami-bypass.m
+          lipo -info KamiBypass.dylib
+        fi
+    - uses: actions/upload-artifact@v4
+      with:
+        name: KamiBypass
+        path: KamiBypass.dylib
