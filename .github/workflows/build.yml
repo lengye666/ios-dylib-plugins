@@ -1,0 +1,32 @@
+name: Build TIX Bypass Dylib
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build Dylib
+      run: |
+        clang -arch arm64 -arch arm64e \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -target arm64-apple-ios14.0 \
+          -shared \
+          -dynamiclib \
+          -framework Foundation \
+          -fobjc-arc \
+          -o TIXBypass.dylib \
+          bypass.m
+
+        lipo -info TIXBypass.dylib
+        ls -la TIXBypass.dylib
+
+    - name: Upload Dylib
+      uses: actions/upload-artifact@v4
+      with:
+        name: TIXBypass
+        path: TIXBypass.dylib
