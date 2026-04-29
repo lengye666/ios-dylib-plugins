@@ -146,22 +146,41 @@ static void NWRecordOnMain(NWRequest *req) {
 }
 @end
 
-#pragma mark - Session Swizzle
+#pragma mark - Session Swizzle (safe: only hook session creation, not getter)
 
 static void NWSwizzleSession(void) {
-    // Swizzle protocolClasses getter on NSURLSessionConfiguration
-    // This catches ALL NSURLSession usage regardless of config type
-    Method m = class_getInstanceMethod([NSURLSessionConfiguration class], @selector(protocolClasses));
-    IMP origIMP = method_getImplementation(m);
-    IMP newIMP = imp_implementationWithBlock(^NSArray *(NSURLSessionConfiguration *self) {
-        NSArray *orig = ((NSArray *(*)(id, SEL))origIMP)(self, @selector(protocolClasses));
-        NSMutableArray *mut = [orig mutableCopy] ?: [NSMutableArray new];
-        if (![mut containsObject:[NWLogProtocol class]]) {
-            [mut insertObject:[NWLogProtocol class] atIndex:0];
+    Class cls = [NSURLSession class];
+    SEL origSel = @selector(sessionWithConfiguration:delegate:delegateQueue:);
+    Method origMethod = class_getInstanceMethod(cls, origSel);
+    IMP origIMP = method_getImplementation(origMethod);
+
+    IMP newIMP = imp_implementationWithBlock(^id(id self, NSURLSessionConfiguration *config, id delegate, NSOperationQueue *queue) {
+        if (config) {
+            NSMutableArray *classes = [NSMutableArray arrayWithArray:config.protocolClasses ?: @[]];
+            if (![classes containsObject:[NWLogProtocol class]]) {
+                [classes insertObject:[NWLogProtocol class] atIndex:0];
+            }
+            config.protocolClasses = [classes copy];
         }
-        return [mut copy];
+        return ((id (*)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *))origIMP)(self, origSel, config, delegate, queue);
     });
-    method_setImplementation(m, newIMP);
+    method_setImplementation(origMethod, newIMP);
+
+    // Also hook +sessionWithConfiguration: (no delegate)
+    SEL sel2 = @selector(sessionWithConfiguration:);
+    Method m2 = class_getInstanceMethod(cls, sel2);
+    IMP imp2 = method_getImplementation(m2);
+    IMP newImp2 = imp_implementationWithBlock(^id(id self, NSURLSessionConfiguration *config) {
+        if (config) {
+            NSMutableArray *classes = [NSMutableArray arrayWithArray:config.protocolClasses ?: @[]];
+            if (![classes containsObject:[NWLogProtocol class]]) {
+                [classes insertObject:[NWLogProtocol class] atIndex:0];
+            }
+            config.protocolClasses = [classes copy];
+        }
+        return ((id (*)(id, SEL, NSURLSessionConfiguration *))imp2)(self, sel2, config);
+    });
+    method_setImplementation(m2, newImp2);
 }
 
 #pragma mark ======== Layer 2: CFNetwork fishhook ========
