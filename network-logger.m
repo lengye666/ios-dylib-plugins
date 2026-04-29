@@ -694,7 +694,7 @@ static void NWLoggerInit(void) {
     if (NWHasUIKit()) {
         // === UI PROCESS MODE ===
         NSLog(@"[NetworkLogger] v4 - UI mode");
-        NWHookProcess(); // Hook Process to inject into subprocesses
+        // Note: Process hook disabled - DYLD_INSERT_LIBRARIES breaks some subprocesses
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             NWCreateBadge();
         });
