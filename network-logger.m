@@ -2,9 +2,12 @@
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <mach-o/dyld.h>
 
 // ==========================================
-// NetworkLogger v3 - Safe session swizzle + UI
+// NetworkLogger v4 - Full coverage
+// - UI process: NSURLProtocol + swizzle + floating UI
+// - Subprocess: auto-injected via Process hook, logs to file
 // ==========================================
 
 #pragma mark - Block Target Wrapper
@@ -54,13 +57,62 @@ static void NWRetainObj(id obj) {
 static NSMutableArray<NWRequest *> *gRequests;
 static UIWindow *gFloatWin;
 static CGFloat gScrW, gScrH;
+static BOOL gIsSubprocess = NO;
+
+// Subprocess log file path
+static NSString *gSubLogPath(void) {
+    return @"/var/mobile/Documents/NW_subprocess.log";
+}
 
 static void NWShowDetailList(void);
+static void NWShowSubLog(void);
 static void NWCopyAllLogs(void);
 static void NWShowDetail(NWRequest *req);
 static NSString *NWTimeStr(NSDate *date);
 
-#pragma mark - NSURLProtocol Interceptor
+#pragma mark - Detection
+
+static BOOL NWHasUIKit(void) {
+    int count = _dyld_image_count();
+    for (int i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "UIKit.framework")) return YES;
+    }
+    return NO;
+}
+
+// Find our dylib's file path on disk
+static NSString *NWFindDylibPath(void) {
+    int count = _dyld_image_count();
+    for (int i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "NetworkLogger")) {
+            return [NSString stringWithUTF8String:name];
+        }
+    }
+    return nil;
+}
+
+#pragma mark - Subprocess file logging
+
+static void NWWriteSubLog(NSString *line) {
+    static FILE *gSubLogFile = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        gSubLogFile = fopen(gSubLogPath().UTF8String, "w");
+        if (gSubLogFile) {
+            // Write header
+            fprintf(gSubLogFile, "NetworkLogger - Subprocess Log\n\n");
+            fflush(gSubLogFile);
+        }
+    });
+    if (gSubLogFile) {
+        fwrite(line.UTF8String, 1, line.length, gSubLogFile);
+        fflush(gSubLogFile);
+    }
+}
+
+#pragma mark ======== NSURLProtocol Interceptor ========
 
 @interface NWLogProtocol : NSURLProtocol <NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSURLSessionDataTask *task;
@@ -93,31 +145,67 @@ static NSString *NWTimeStr(NSDate *date);
 
 - (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)dt
     didReceiveResponse:(NSURLResponse *)resp completionHandler:(void (^)(NSURLSessionResponseDisposition))h {
-    NWRequest *e = [NWRequest new];
-    e.url = self.request.URL.absoluteString;
-    e.method = self.request.HTTPMethod ?: @"GET";
-    e.statusCode = ((NSHTTPURLResponse *)resp).statusCode;
-    e.responseHeaders = ((NSHTTPURLResponse *)resp).allHeaderFields;
-    e.requestHeaders = self.request.allHTTPHeaderFields;
-    e.timestamp = NWTimeStr([NSDate date]);
-    if (self.request.HTTPBody) {
-        NSData *body = self.request.HTTPBody.length > 2048
-            ? [self.request.HTTPBody subdataWithRange:NSMakeRange(0, 2048)] : self.request.HTTPBody;
-        e.requestBody = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-        if (!e.requestBody) e.requestBody = @"[binary]";
+
+    NSString *ts = NWTimeStr([NSDate date]);
+
+    if (gIsSubprocess) {
+        // Subprocess: write to file
+        NSString *line = [NSString stringWithFormat:@"[%@] %@ %@ → %ld\n",
+            ts, self.request.HTTPMethod ?: @"GET",
+            self.request.URL.absoluteString,
+            (long)((NSHTTPURLResponse *)resp).statusCode];
+        NWWriteSubLog(line);
+    } else {
+        // Main process: add to array
+        NWRequest *e = [NWRequest new];
+        e.url = self.request.URL.absoluteString;
+        e.method = self.request.HTTPMethod ?: @"GET";
+        e.statusCode = ((NSHTTPURLResponse *)resp).statusCode;
+        e.responseHeaders = ((NSHTTPURLResponse *)resp).allHeaderFields;
+        e.requestHeaders = self.request.allHTTPHeaderFields;
+        e.timestamp = ts;
+        if (self.request.HTTPBody) {
+            NSData *body = self.request.HTTPBody.length > 2048
+                ? [self.request.HTTPBody subdataWithRange:NSMakeRange(0, 2048)] : self.request.HTTPBody;
+            e.requestBody = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+            if (!e.requestBody) e.requestBody = @"[binary]";
+        }
+        [gRequests addObject:e];
     }
-    [gRequests addObject:e];
+
     [self.client URLProtocol:self didReceiveResponse:resp cacheStoragePolicy:NSURLCacheStorageNotAllowed];
     h(NSURLSessionResponseAllow);
 }
 
 - (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)dt didReceiveData:(NSData *)data {
     [self.respData appendData:data];
-    [self.client URLProtocol:self didLoadData:data]; // forward body to app!
+    [self.client URLProtocol:self didLoadData:data];
+
+    // Also log response headers once we have some data
+    if (!gIsSubprocess && gRequests.count > 0) {
+        NWRequest *last = gRequests.lastObject;
+        if (!last.responseBody) {
+            NSData *d = self.respData.length > 10240
+                ? [self.respData subdataWithRange:NSMakeRange(0, 10240)] : self.respData;
+            // Will be finalized in didCompleteWithError
+        }
+    }
 }
 
 - (void)URLSession:(NSURLSession *)s task:(NSURLSessionDataTask *)t didCompleteWithError:(NSError *)err {
-    if (gRequests.count > 0) {
+    NSString *ts = NWTimeStr([NSDate date]);
+
+    if (gIsSubprocess) {
+        // Subprocess: log completion
+        NSString *line;
+        if (err) {
+            line = [NSString stringWithFormat:@"[%@] ERROR: %@\n\n", ts, err.localizedDescription];
+        } else {
+            long bytes = (long)self.respData.length;
+            line = [NSString stringWithFormat:@"[%@] Done (%ld bytes)\n\n", ts, bytes];
+        }
+        NWWriteSubLog(line);
+    } else if (gRequests.count > 0) {
         NWRequest *last = gRequests.lastObject;
         last.duration = [[NSDate date] timeIntervalSinceDate:self.startTime] * 1000;
         if (self.respData.length > 0) {
@@ -132,11 +220,9 @@ static NSString *NWTimeStr(NSDate *date);
 }
 @end
 
-#pragma mark - Safe Session Swizzle (using metaclass for + methods)
+#pragma mark - Session Swizzle (metaclass)
 
 static void NWSwizzleSession(void) {
-    // sessionWithConfiguration:delegate:delegateQueue: is a CLASS method
-    // Must use metaclass to hook it
     Class metaCls = object_getClass([NSURLSession class]);
 
     SEL sel1 = @selector(sessionWithConfiguration:delegate:delegateQueue:);
@@ -154,7 +240,6 @@ static void NWSwizzleSession(void) {
             return ((id (*)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *))origIMP)(self, sel1, config, delegate, queue);
         });
         method_setImplementation(m1, newIMP);
-        NSLog(@"[NW] Hooked sessionWithConfiguration:delegate:delegateQueue:");
     }
 
     SEL sel2 = @selector(sessionWithConfiguration:);
@@ -172,8 +257,47 @@ static void NWSwizzleSession(void) {
             return ((id (*)(id, SEL, NSURLSessionConfiguration *))origIMP2)(self, sel2, config);
         });
         method_setImplementation(m2, newIMP2);
-        NSLog(@"[NW] Hooked sessionWithConfiguration:");
     }
+}
+
+#pragma mark - Hook Process to inject DYLD_INSERT_LIBRARIES
+
+static void NWHookProcess(void) {
+    // Process (Swift) is bridged to NSTask (ObjC)
+    Class processClass = NSClassFromString(@"NSTask");
+    if (!processClass) processClass = NSClassFromString(@"Process");
+    if (!processClass) return;
+
+    NSString *dylibPath = NWFindDylibPath();
+    if (!dylibPath) {
+        NSLog(@"[NW] Cannot find dylib path for Process hook");
+        return;
+    }
+
+    SEL launchSel = @selector(launch);
+    Method m = class_getInstanceMethod(processClass, launchSel);
+    if (!m) return;
+
+    IMP origIMP = method_getImplementation(m);
+    IMP newIMP = imp_implementationWithBlock(^void(id self) {
+        // Inject our dylib into subprocess environment
+        NSMutableDictionary *env = [self.environment mutableCopy];
+        if (!env) env = [NSMutableDictionary new];
+
+        NSString *existing = env[@"DYLD_INSERT_LIBRARIES"];
+        if (existing.length > 0) {
+            env[@"DYLD_INSERT_LIBRARIES"] = [NSString stringWithFormat:@"%@:%@", existing, dylibPath];
+        } else {
+            env[@"DYLD_INSERT_LIBRARIES"] = dylibPath;
+        }
+        self.environment = env;
+
+        NSLog(@"[NW] Process launch → injected DYLD_INSERT_LIBRARIES: %@", dylibPath);
+
+        ((void (*)(id, SEL))origIMP)(self, launchSel);
+    });
+    method_setImplementation(m, newIMP);
+    NSLog(@"[NW] Hooked Process/NSTask launch");
 }
 
 #pragma mark - Date
@@ -289,9 +413,13 @@ static void NWCreateBadge(void) {
     [gBadge addTarget:NWSafeTarget(^{ NWShowDetailList(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [gFloatWin addSubview:gBadge];
 
-    [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *t) {
-        [gBadge setTitle:[NSString stringWithFormat:@"\U0001F4E1 %lu", (unsigned long)gRequests.count]
-                forState:UIControlStateNormal];
+    [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
+        NSString *title = [NSString stringWithFormat:@"\U0001F4E1 %lu", (unsigned long)gRequests.count];
+        // Check if subprocess log exists
+        if ([[NSFileManager defaultManager] fileExistsAtPath:gSubLogPath()]) {
+            title = [title stringByAppendingString:@" \u2B50"]; // star indicator
+        }
+        [gBadge setTitle:title forState:UIControlStateNormal];
     }];
 }
 
@@ -341,32 +469,115 @@ static void NWShowDetailList(void) {
     [container addSubview:tbl];
     helper.tableView = tbl;
 
+    // Bottom bar with 3 buttons
     UIView *bottomBar = [[UIView alloc] initWithFrame:CGRectMake(0, cH - bottomH, gScrW, bottomH)];
     bottomBar.backgroundColor = [UIColor secondarySystemBackgroundColor];
 
     UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    clearBtn.frame = CGRectMake(gScrW / 2 - 110, safeBottom, 100, 40);
+    clearBtn.frame = CGRectMake(10, safeBottom, 70, 40);
     [clearBtn setTitle:@"Clear" forState:UIControlStateNormal];
-    clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
     clearBtn.backgroundColor = [UIColor systemRedColor];
     [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     clearBtn.layer.cornerRadius = 8;
     [clearBtn addTarget:NWSafeTarget(^{ [gRequests removeAllObjects]; tl.text = @"Network Logger (0)"; [helper.tableView reloadData]; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [bottomBar addSubview:clearBtn];
 
+    UIButton *subBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    subBtn.frame = CGRectMake(90, safeBottom, 70, 40);
+    [subBtn setTitle:@"Sub" forState:UIControlStateNormal];
+    subBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    subBtn.backgroundColor = [UIColor systemOrangeColor];
+    [subBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    subBtn.layer.cornerRadius = 8;
+    [subBtn addTarget:NWSafeTarget(^{ NWShowSubLog(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomBar addSubview:subBtn];
+
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(gScrW / 2 + 10, safeBottom, 100, 40);
+    copyBtn.frame = CGRectMake(170, safeBottom, 70, 40);
     [copyBtn setTitle:@"Copy" forState:UIControlStateNormal];
-    copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
     copyBtn.backgroundColor = [UIColor systemBlueColor];
     [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     copyBtn.layer.cornerRadius = 8;
     [copyBtn addTarget:NWSafeTarget(^{ NWCopyAllLogs(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [bottomBar addSubview:copyBtn];
-    [container addSubview:bottomBar];
 
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeBtn.frame = CGRectMake(250, safeBottom, 70, 40);
+    [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    closeBtn.backgroundColor = [UIColor systemGrayColor];
+    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    closeBtn.layer.cornerRadius = 8;
+    [closeBtn addTarget:NWSafeTarget(^{ [UIView animateWithDuration:0.25 animations:^{ helper.tableView.alpha = 0; helper.container.alpha = 0; } completion:^(BOOL f) { win.hidden = YES; }]; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomBar addSubview:closeBtn];
+
+    [container addSubview:bottomBar];
     [win addSubview:container];
     [UIView animateWithDuration:0.3 animations:^{ container.frame = CGRectMake(0, gScrH - cH, gScrW, cH); }];
+}
+
+#pragma mark - Subprocess Log Viewer
+
+static void NWShowSubLog(void) {
+    NSString *content = [NSString stringWithContentsOfFile:gSubLogPath() encoding:NSUTF8StringEncoding error:nil];
+    if (!content || content.length == 0) {
+        content = @"No subprocess log found.\n\nThe target app might not use Process/NSTask,\nor DYLD_INSERT_LIBRARIES was blocked.";
+    }
+
+    UIWindowScene *scene = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+        if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
+    if (!scene) return;
+
+    UIWindow *win = [[UIWindow alloc] initWithWindowScene:scene];
+    win.windowLevel = UIWindowLevelAlert + 300;
+    win.frame = [UIScreen mainScreen].bounds;
+    win.backgroundColor = [UIColor systemBackgroundColor];
+    win.hidden = NO;
+    NWRetainObj(win);
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(0, 0, gScrW, gScrH - 90)];
+    tv.editable = NO;
+    tv.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    tv.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    tv.textColor = [UIColor labelColor];
+    tv.text = content;
+    [win addSubview:tv];
+
+    CGFloat bottomH = 50 + 34;
+    UIView *bottomNav = [[UIView alloc] initWithFrame:CGRectMake(0, gScrH - bottomH, gScrW, bottomH)];
+    bottomNav.backgroundColor = [UIColor secondarySystemBackgroundColor];
+
+    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    copyBtn.frame = CGRectMake(gScrW / 2 - 110, 34, 100, 40);
+    [copyBtn setTitle:@"Copy" forState:UIControlStateNormal];
+    copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    copyBtn.backgroundColor = [UIColor systemBlueColor];
+    [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    copyBtn.layer.cornerRadius = 8;
+    [copyBtn addTarget:NWSafeTarget(^{
+        UIPasteboard.generalPasteboard.string = content;
+        UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(gScrW/2 - 50, gScrH/2, 100, 36)];
+        toast.text = @"Copied!"; toast.textAlignment = NSTextAlignmentCenter;
+        toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
+        toast.textColor = [UIColor whiteColor]; toast.layer.cornerRadius = 8; toast.clipsToBounds = YES;
+        [win addSubview:toast];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [toast removeFromSuperview]; });
+    }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomNav addSubview:copyBtn];
+
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeBtn.frame = CGRectMake(gScrW / 2 + 10, 34, 100, 40);
+    [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    closeBtn.backgroundColor = [UIColor systemGrayColor];
+    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    closeBtn.layer.cornerRadius = 8;
+    [closeBtn addTarget:NWSafeTarget(^{ win.hidden = YES; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomNav addSubview:closeBtn];
+    [win addSubview:bottomNav];
 }
 
 #pragma mark - Request Detail
@@ -415,12 +626,6 @@ static void NWShowDetail(NWRequest *req) {
     copyBtn.layer.cornerRadius = 8;
     [copyBtn addTarget:NWSafeTarget(^{
         UIPasteboard.generalPasteboard.string = text;
-        UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(gScrW/2 - 50, gScrH/2, 100, 36)];
-        toast.text = @"Copied!"; toast.textAlignment = NSTextAlignmentCenter;
-        toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
-        toast.textColor = [UIColor whiteColor]; toast.layer.cornerRadius = 8; toast.clipsToBounds = YES;
-        [win addSubview:toast];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [toast removeFromSuperview]; });
     }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [bottomNav addSubview:copyBtn];
 
@@ -440,31 +645,25 @@ static void NWShowDetail(NWRequest *req) {
 
 static void NWCopyAllLogs(void) {
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"NetworkLogger - %lu requests\nDevice: %@ | OS: %@\n\n",
+    [text appendFormat:@"NetworkLogger v4 - Main Process: %lu requests\nDevice: %@ | OS: %@\n\n",
         (unsigned long)gRequests.count, [[UIDevice currentDevice] model], [[UIDevice currentDevice] systemVersion]];
-    NSMutableArray *jsonArr = [NSMutableArray new];
+
     for (NSUInteger i = 0; i < gRequests.count; i++) {
         NWRequest *r = gRequests[i];
-        [text appendFormat:@"-------- #%lu --------\n", (unsigned long)(i+1)];
-        [text appendFormat:@"%@ %@ [%ld] (%.0fms)\n", r.method, r.url, (long)r.statusCode, r.duration];
-        [text appendFormat:@"Time: %@\n", r.timestamp];
-        if (r.requestHeaders.count > 0) { [text appendString:@"Req H:\n"]; for (NSString *k in r.requestHeaders) [text appendFormat:@"  %@: %@\n", k, r.requestHeaders[k]]; }
-        if (r.requestBody.length > 0) [text appendFormat:@"Req B: %@\n", r.requestBody];
-        if (r.responseHeaders.count > 0) { [text appendString:@"Resp H:\n"]; for (NSString *k in r.responseHeaders) [text appendFormat:@"  %@: %@\n", k, r.responseHeaders[k]]; }
-        if (r.responseBody.length > 0) [text appendFormat:@"Resp B:\n%@\n", r.responseBody];
+        [text appendFormat:@"#%lu %@ %@ [%ld] (%.0fms)\n", (unsigned long)(i+1), r.method, r.url, (long)r.statusCode, r.duration];
+        if (r.requestHeaders.count > 0) { [text appendString:@"  ReqH: "]; for (NSString *k in r.requestHeaders) [text appendFormat:@"%@=%@ ", k, r.requestHeaders[k]]; [text appendString:@"\n"]; }
+        if (r.responseHeaders.count > 0) { [text appendString:@"  RespH: "]; for (NSString *k in r.responseHeaders) [text appendFormat:@"%@=%@ ", k, r.responseHeaders[k]]; [text appendString:@"\n"]; }
+        if (r.responseBody.length > 0) [text appendFormat:@"  RespB: %@\n", r.responseBody];
         [text appendString:@"\n"];
-        NSMutableDictionary *d = [NSMutableDictionary new];
-        d[@"method"] = r.method; d[@"url"] = r.url; d[@"status"] = @(r.statusCode);
-        d[@"timestamp"] = r.timestamp; d[@"duration_ms"] = @(r.duration);
-        if (r.requestHeaders) d[@"reqH"] = r.requestHeaders;
-        if (r.responseHeaders) d[@"respH"] = r.responseHeaders;
-        if (r.requestBody) d[@"reqB"] = r.requestBody;
-        if (r.responseBody) d[@"respB"] = r.responseBody;
-        [jsonArr addObject:d];
     }
-    [text appendString:@"=== JSON ===\n"];
-    NSData *jd = [NSJSONSerialization dataWithJSONObject:jsonArr options:NSJSONWritingPrettyPrinted error:nil];
-    if (jd) [text appendString:[[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding]];
+
+    // Append subprocess log if exists
+    NSString *subLog = [NSString stringWithContentsOfFile:gSubLogPath() encoding:NSUTF8StringEncoding error:nil];
+    if (subLog.length > 0) {
+        [text appendString:@"=== SUBPROCESS LOG ===\n"];
+        [text appendString:subLog];
+    }
+
     UIPasteboard.generalPasteboard.string = text;
 
     UIWindowScene *scene = nil;
@@ -486,17 +685,22 @@ static void NWCopyAllLogs(void) {
 
 __attribute__((constructor))
 static void NWLoggerInit(void) {
-    NSLog(@"[NetworkLogger] v3 loading...");
     gRequests = [NSMutableArray new];
 
-    // Register protocol globally (catches default sessions)
+    // Network hooks (work in both UI and subprocess mode)
     [NSURLProtocol registerClass:[NWLogProtocol class]];
-
-    // Swizzle NSURLSession class methods via metaclass
     NWSwizzleSession();
 
-    // UI
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        NWCreateBadge();
-    });
+    if (NWHasUIKit()) {
+        // === UI PROCESS MODE ===
+        NSLog(@"[NetworkLogger] v4 - UI mode");
+        NWHookProcess(); // Hook Process to inject into subprocesses
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            NWCreateBadge();
+        });
+    } else {
+        // === SUBPROCESS MODE ===
+        gIsSubprocess = YES;
+        NSLog(@"[NetworkLogger] v4 - Subprocess mode, logging to %@", gSubLogPath());
+    }
 }
