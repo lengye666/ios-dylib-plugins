@@ -113,6 +113,7 @@ static NSString *NWTimeStr(NSDate *date);
 
 - (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)dt didReceiveData:(NSData *)data {
     [self.respData appendData:data];
+    [self.client URLProtocol:self didLoadData:data]; // forward body to app!
 }
 
 - (void)URLSession:(NSURLSession *)s task:(NSURLSessionDataTask *)t didCompleteWithError:(NSError *)err {
