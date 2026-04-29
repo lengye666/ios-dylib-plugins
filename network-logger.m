@@ -281,7 +281,7 @@ static void NWHookProcess(void) {
     IMP origIMP = method_getImplementation(m);
     IMP newIMP = imp_implementationWithBlock(^void(id self) {
         // Inject our dylib into subprocess environment
-        NSMutableDictionary *env = [self.environment mutableCopy];
+        NSMutableDictionary *env = [[self valueForKey:@"environment"] mutableCopy];
         if (!env) env = [NSMutableDictionary new];
 
         NSString *existing = env[@"DYLD_INSERT_LIBRARIES"];
@@ -290,7 +290,7 @@ static void NWHookProcess(void) {
         } else {
             env[@"DYLD_INSERT_LIBRARIES"] = dylibPath;
         }
-        self.environment = env;
+        [self setValue:env forKey:@"environment"];
 
         NSLog(@"[NW] Process launch → injected DYLD_INSERT_LIBRARIES: %@", dylibPath);
 
