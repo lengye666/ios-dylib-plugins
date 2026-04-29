@@ -155,6 +155,25 @@ static NSString *NWDateToString(NSDate *date) {
     return [fmt stringFromDate:date];
 }
 
+#pragma mark - 拖动手势处理
+
+@interface NWDragHandler : NSObject
+@property (nonatomic, weak) UIWindow *window;
+@property (nonatomic, assign) CGSize buttonSize;
+@end
+@implementation NWDragHandler
+- (void)handlePan:(UIPanGestureRecognizer *)g {
+    CGPoint t = [g translationInView:g.view];
+    CGPoint origin = self.window.frame.origin;
+    origin.x += t.x;
+    origin.y += t.y;
+    origin.x = MAX(0, MIN(NWScreenW - self.buttonSize.width, origin.x));
+    origin.y = MAX(44, MIN(NWScreenH - self.buttonSize.height, origin.y));
+    self.window.frame = CGRectMake(origin.x, origin.y, self.buttonSize.width, self.buttonSize.height);
+    [g setTranslation:CGPointZero inView:g.view];
+}
+@end
+
 #pragma mark - 浮窗按钮
 
 static UIButton *NWBadgeBtn;
@@ -189,12 +208,11 @@ static void NWCreateFloatingBadge(void) {
     [NWBadgeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 
     // 拖动手势
+    NWDragHandler *dragHandler = [NWDragHandler new];
+    dragHandler.window = NWFloatingWindow;
+    dragHandler.buttonSize = CGSizeMake(size, size);
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-        initWithTarget:[NWBlockTarget withBlock:^{
-            // handled in delegate method below
-        }] action:@selector(fire)];
-    // 用更简单的方式：直接用 gesture delegate
-    pan = [[UIPanGestureRecognizer alloc] initWithTarget:NWBadgeBtn action:@selector(fire)];
+        initWithTarget:dragHandler action:@selector(handlePan:)];
     [NWBadgeBtn addGestureRecognizer:pan];
 
     // 点击展示列表
