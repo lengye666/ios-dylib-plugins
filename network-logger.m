@@ -294,46 +294,61 @@ static void NWShowDetailList(void) {
 
     // Container
     CGFloat cH = gScrH * 0.75;
+    CGFloat safeBottom = 34; // iPhone 14 Pro home indicator
     UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, gScrH, gScrW, cH)];
     container.backgroundColor = [UIColor systemBackgroundColor];
     helper.container = container;
 
-    // Toolbar
-    CGFloat tbH = 50;
-    UIView *tb = [[UIView alloc] initWithFrame:CGRectMake(0, 0, gScrW, tbH)];
-    tb.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    // Top title bar
+    CGFloat topH = 50;
+    UIView *topBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, gScrW, topH)];
+    topBar.backgroundColor = [UIColor secondarySystemBackgroundColor];
 
-    UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, gScrW * 0.5, tbH)];
+    UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, gScrW - 32, topH)];
     tl.text = [NSString stringWithFormat:@"Network Logger (%lu)", (unsigned long)gRequests.count];
     tl.font = [UIFont boldSystemFontOfSize:16];
     tl.textColor = [UIColor labelColor];
-    [tb addSubview:tl];
+    tl.textAlignment = NSTextAlignmentCenter;
+    [topBar addSubview:tl];
     helper.titleLabel = tl;
+    [container addSubview:topBar];
 
-    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    clearBtn.frame = CGRectMake(gScrW - 120, 8, 50, 34);
-    [clearBtn setTitle:@"Clear" forState:UIControlStateNormal];
-    [clearBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-    [clearBtn addTarget:NWSafeTarget(^{ [gRequests removeAllObjects]; tl.text = @"Network Logger (0)"; [helper.tableView reloadData]; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-    [tb addSubview:clearBtn];
-
-    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(gScrW - 60, 8, 50, 34);
-    [copyBtn setTitle:@"Copy" forState:UIControlStateNormal];
-    [copyBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
-    [copyBtn addTarget:NWSafeTarget(^{ NWCopyAllLogs(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-    [tb addSubview:copyBtn];
-
-    [container addSubview:tb];
-
-    // Table
-    UITableView *tbl = [[UITableView alloc] initWithFrame:CGRectMake(0, tbH, gScrW, cH - tbH) style:UITableViewStylePlain];
+    // Table (between top bar and bottom buttons)
+    CGFloat bottomH = 50 + safeBottom;
+    UITableView *tbl = [[UITableView alloc] initWithFrame:CGRectMake(0, topH, gScrW, cH - topH - bottomH) style:UITableViewStylePlain];
     tbl.dataSource = helper;
     tbl.delegate = helper;
     tbl.rowHeight = UITableViewAutomaticDimension;
     tbl.estimatedRowHeight = 60;
     [container addSubview:tbl];
     helper.tableView = tbl;
+
+    // Bottom button bar
+    UIView *bottomBar = [[UIView alloc] initWithFrame:CGRectMake(0, cH - bottomH, gScrW, bottomH)];
+    bottomBar.backgroundColor = [UIColor secondarySystemBackgroundColor];
+
+    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    clearBtn.frame = CGRectMake(gScrW / 2 - 110, safeBottom, 100, 40);
+    [clearBtn setTitle:@"Clear" forState:UIControlStateNormal];
+    [clearBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+    clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    clearBtn.backgroundColor = [UIColor systemRedColor];
+    [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    clearBtn.layer.cornerRadius = 8;
+    [clearBtn addTarget:NWSafeTarget(^{ [gRequests removeAllObjects]; tl.text = @"Network Logger (0)"; [helper.tableView reloadData]; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomBar addSubview:clearBtn];
+
+    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    copyBtn.frame = CGRectMake(gScrW / 2 + 10, safeBottom, 100, 40);
+    [copyBtn setTitle:@"Copy" forState:UIControlStateNormal];
+    copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    copyBtn.backgroundColor = [UIColor systemBlueColor];
+    [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    copyBtn.layer.cornerRadius = 8;
+    [copyBtn addTarget:NWSafeTarget(^{ NWCopyAllLogs(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomBar addSubview:copyBtn];
+
+    [container addSubview:bottomBar];
 
     [win addSubview:container];
     [UIView animateWithDuration:0.3 animations:^{ container.frame = CGRectMake(0, gScrH - cH, gScrW, cH); }];
