@@ -479,13 +479,40 @@ static void NWCopyAllLogs(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ tw.hidden = YES; });
 }
 
+#pragma mark - Session Swizzle
+
+// NSURLProtocol 只对 defaultSessionConfiguration 生效
+// 很多库用 ephemeral/custom configuration，需要 swizzle 强制注入
+static void NWSwizzleSession(void) {
+    Class cls = [NSURLSession class];
+    SEL origSel = @selector(sessionWithConfiguration:delegate:delegateQueue:);
+
+    // 保存原实现
+    Method origMethod = class_getInstanceMethod(cls, origSel);
+    IMP origIMP = method_getImplementation(origMethod);
+
+    // 替换为我们的实现
+    IMP newIMP = imp_implementationWithBlock(^(id self, NSURLSessionConfiguration *config, id delegate, NSOperationQueue *queue) {
+        // 注入我们的 protocol 到所有 configuration
+        NSMutableArray *classes = [NSMutableArray arrayWithArray:config.protocolClasses ?: @[]];
+        if (![classes containsObject:[NWLogProtocol class]]) {
+            [classes insertObject:[NWLogProtocol class] atIndex:0];
+        }
+        config.protocolClasses = classes;
+        // 调用原实现
+        return ((NSURLSession *(*)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *))origIMP)(self, origSel, config, delegate, queue);
+    });
+    method_setImplementation(origMethod, newIMP);
+}
+
 #pragma mark - Entry
 
 __attribute__((constructor))
 static void NWLoggerInit(void) {
-    NSLog(@"[NetworkLogger] loaded");
+    NSLog(@"[NetworkLogger] loaded - swizzling all NSURLSession");
     gRequests = [NSMutableArray new];
     [NSURLProtocol registerClass:[NWLogProtocol class]];
+    NWSwizzleSession();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         NWCreateBadge();
     });
