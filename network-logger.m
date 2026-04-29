@@ -262,7 +262,7 @@ static void NWCreateBadge(void) {
     if (!scene) return;
 
     gFloatWin = [[UIWindow alloc] initWithWindowScene:scene];
-    gFloatWin.windowLevel = UIWindowLevelStatusBar + 100;
+    gFloatWin.windowLevel = UIWindowLevelAlert + 100;
     gFloatWin.backgroundColor = [UIColor clearColor];
     gFloatWin.clipsToBounds = YES;
     gFloatWin.hidden = NO;
