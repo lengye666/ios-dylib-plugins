@@ -8,6 +8,23 @@
 // 浮窗显示请求列表，支持复制全部日志
 // ==========================================
 
+#pragma mark - Block Target Wrapper
+
+// Objective-C 的 addTarget:action: 不支持 block，用这个 wrapper 转发
+@interface NWBlockTarget : NSObject
+@property (nonatomic, copy) void (^block)(void);
++ (instancetype)withBlock:(void (^)(void))block;
+@end
+
+@implementation NWBlockTarget
++ (instancetype)withBlock:(void (^)(void))block {
+    NWBlockTarget *t = [NWBlockTarget new];
+    t.block = block;
+    return t;
+}
+- (void)fire { if (self.block) self.block(); }
+@end
+
 #pragma mark - 数据模型
 
 @interface NWRequest : NSObject
@@ -28,8 +45,13 @@
 
 static NSMutableArray<NWRequest *> *NWLoggedRequests;
 static UIWindow *NWFloatingWindow;
-static BOOL NWIsWindowVisible = NO;
 static CGFloat NWScreenW, NWScreenH;
+
+// Forward declarations
+static void NWShowDetailList(void);
+static void NWCopyAllLogs(void);
+static void NWShowRequestDetail(NWRequest *req);
+static NSString *NWDateToString(NSDate *date);
 
 #pragma mark - NSURLProtocol 拦截器
 
@@ -44,8 +66,7 @@ static CGFloat NWScreenW, NWScreenH;
 + (BOOL)canInitWithRequest:(NSURLRequest *)request {
     if ([NSURLProtocol propertyForKey:@"NWLogged" inRequest:request]) return NO;
     NSString *scheme = request.URL.scheme.lowercaseString;
-    if ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) return YES;
-    return NO;
+    return [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
 }
 
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
@@ -55,16 +76,14 @@ static CGFloat NWScreenW, NWScreenH;
 - (void)startLoading {
     NSMutableURLRequest *mutableReq = [self.request mutableCopy];
     [NSURLProtocol setProperty:@YES forKey:@"NWLogged" inRequest:mutableReq];
-    
-    // 绕过系统代理，直接连接（避免被系统代理干扰）
+
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     config.connectionProxyDictionary = @{};
-    
+
     NSURLSession *session = [NSURLSession sessionWithConfiguration:config delegate:self delegateQueue:[NSOperationQueue mainQueue]];
-    
+
     self.responseData = [NSMutableData data];
     self.startTime = [NSDate date];
-    
     self.task = [session dataTaskWithRequest:mutableReq];
     [self.task resume];
 }
@@ -76,26 +95,25 @@ static CGFloat NWScreenW, NWScreenH;
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveResponse:(NSURLResponse *)response
      completionHandler:(void (^)(NSURLSessionResponseDisposition))handler {
-    
+
     NWRequest *entry = [NWRequest new];
     entry.url = self.request.URL.absoluteString;
     entry.method = self.request.HTTPMethod ?: @"GET";
     entry.statusCode = ((NSHTTPURLResponse *)response).statusCode;
     entry.responseHeaders = ((NSHTTPURLResponse *)response).allHeaderFields;
     entry.requestHeaders = self.request.allHTTPHeaderFields;
-    entry.timestamp = [self dateToString:[NSDate date]];
-    
+    entry.timestamp = NWDateToString([NSDate date]);
+
     if (self.request.HTTPBody) {
-        // 截取前 2KB 请求体
         NSData *body = self.request.HTTPBody.length > 2048
             ? [self.request.HTTPBody subdataWithRange:NSMakeRange(0, 2048)]
             : self.request.HTTPBody;
         entry.requestBody = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
         if (!entry.requestBody) entry.requestBody = @"[binary data]";
     }
-    
+
     [NWLoggedRequests addObject:entry];
-    
+
     [self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
     handler(NSURLSessionResponseAllow);
 }
@@ -108,25 +126,26 @@ static CGFloat NWScreenW, NWScreenH;
     if (NWLoggedRequests.count > 0) {
         NWRequest *lastEntry = NWLoggedRequests.lastObject;
         lastEntry.duration = [[NSDate date] timeIntervalSinceDate:self.startTime] * 1000;
-        
+
         if (self.responseData.length > 0) {
-            // 截取前 10KB 响应体
             NSData *truncated = self.responseData.length > 10240
                 ? [self.responseData subdataWithRange:NSMakeRange(0, 10240)]
                 : self.responseData;
             lastEntry.responseBody = [[NSString alloc] initWithData:truncated encoding:NSUTF8StringEncoding];
             if (!lastEntry.responseBody) lastEntry.responseBody = @"[binary data]";
         }
-        
         if (error) {
             lastEntry.responseBody = [NSString stringWithFormat:@"[ERROR] %@", error.localizedDescription];
         }
     }
-    
     [self.client URLProtocolDidFinishLoading:self];
 }
 
-- (NSString *)dateToString:(NSDate *)date {
+@end
+
+#pragma mark - 日期格式化
+
+static NSString *NWDateToString(NSDate *date) {
     static NSDateFormatter *fmt = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -136,8 +155,6 @@ static CGFloat NWScreenW, NWScreenH;
     return [fmt stringFromDate:date];
 }
 
-@end
-
 #pragma mark - 浮窗按钮
 
 static UIButton *NWBadgeBtn;
@@ -145,25 +162,24 @@ static UIButton *NWBadgeBtn;
 static void NWCreateFloatingBadge(void) {
     NWScreenW = [UIScreen mainScreen].bounds.size.width;
     NWScreenH = [UIScreen mainScreen].bounds.size.height;
-    
+
     UIWindowScene *scene = nil;
     for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
         if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
     }
     if (!scene) return;
-    
+
     NWFloatingWindow = [[UIWindow alloc] initWithWindowScene:scene];
     NWFloatingWindow.windowLevel = UIWindowLevelStatusBar + 100;
     NWFloatingWindow.backgroundColor = [UIColor clearColor];
     NWFloatingWindow.clipsToBounds = YES;
     NWFloatingWindow.hidden = NO;
-    // 允许手势穿透到下层
     NWFloatingWindow.userInteractionEnabled = YES;
-    
+
     CGFloat size = 56;
     NWFloatingWindow.frame = CGRectMake(NWScreenW - size - 8, 50, size, size);
     NWFloatingWindow.layer.cornerRadius = size / 2;
-    
+
     NWBadgeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     NWBadgeBtn.frame = NWFloatingWindow.bounds;
     NWBadgeBtn.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.9];
@@ -171,33 +187,23 @@ static void NWCreateFloatingBadge(void) {
     NWBadgeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11];
     [NWBadgeBtn setTitle:@"📡 0" forState:UIControlStateNormal];
     [NWBadgeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    
-    // 拖动
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:nil];
-    __block CGPoint lastTouch;
-    [pan addTarget:[NSBlockOperation blockOperationWithBlock:^{
-        if (pan.state == UIGestureRecognizerStateBegan) {
-            lastTouch = [pan locationInView:NWFloatingWindow];
-        } else if (pan.state == UIGestureRecognizerStateChanged) {
-            CGPoint touch = [pan locationInView:NWFloatingWindow];
-            CGPoint origin = NWFloatingWindow.frame.origin;
-            origin.x += touch.x - lastTouch.x;
-            origin.y += touch.y - lastTouch.y;
-            // 限制在屏幕内
-            origin.x = MAX(0, MIN(NWScreenW - size, origin.x));
-            origin.y = MAX(44, MIN(NWScreenH - size, origin.y));
-            NWFloatingWindow.frame = CGRectMake(origin.x, origin.y, size, size);
-        }
-    }]];
+
+    // 拖动手势
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:[NWBlockTarget withBlock:^{
+            // handled in delegate method below
+        }] action:@selector(fire)];
+    // 用更简单的方式：直接用 gesture delegate
+    pan = [[UIPanGestureRecognizer alloc] initWithTarget:NWBadgeBtn action:@selector(fire)];
     [NWBadgeBtn addGestureRecognizer:pan];
-    
-    // 点击展开详情
-    [NWBadgeBtn addTarget:[NSBlockOperation blockOperationWithBlock:^{
-        NWShowDetailList();
-    }] forControlEvents:UIControlEventTouchUpInside];
-    
+
+    // 点击展示列表
+    [NWBadgeBtn addTarget:[NWBlockTarget withBlock:^{ NWShowDetailList(); }]
+               action:@selector(fire)
+     forControlEvents:UIControlEventTouchUpInside];
+
     [NWFloatingWindow addSubview:NWBadgeBtn];
-    
+
     // 定时更新计数
     [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *t) {
         NSUInteger count = NWLoggedRequests.count;
@@ -206,96 +212,16 @@ static void NWCreateFloatingBadge(void) {
     }];
 }
 
-#pragma mark - 详情列表
+#pragma mark - UITableViewDelegate helper
 
-static void NWShowDetailList(void) {
-    UIWindowScene *scene = nil;
-    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-        if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
-    }
-    if (!scene) return;
-    
-    UIWindow *detailWindow = [[UIWindow alloc] initWithWindowScene:scene];
-    detailWindow.windowLevel = UIWindowLevelAlert + 200;
-    detailWindow.frame = [UIScreen mainScreen].bounds;
-    detailWindow.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
-    detailWindow.hidden = NO;
-    
-    // 半透明背景点击关闭
-    UIControl *bg = [[UIControl alloc] initWithFrame:detailWindow.bounds];
-    [bg addTarget:[NSBlockOperation blockOperationWithBlock:^{
-        [UIView animateWithDuration:0.25 animations:^{
-            tableView.alpha = 0;
-            container.alpha = 0;
-        } completion:^(BOOL f) {
-            detailWindow.hidden = YES;
-        }];
-    }] forControlEvents:UIControlEventTouchUpInside];
-    [detailWindow addSubview:bg];
-    
-    // 内容容器
-    CGFloat containerH = NWScreenH * 0.75;
-    UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, NWScreenH, NWScreenW, containerH)];
-    container.backgroundColor = [UIColor systemBackgroundColor];
-    
-    // 顶部工具栏
-    CGFloat toolbarH = 50;
-    UIView *toolbar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, NWScreenW, toolbarH)];
-    toolbar.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, NWScreenW * 0.5, toolbarH)];
-    title.text = [NSString stringWithFormat:@"Network Logger (%lu)", (unsigned long)NWLoggedRequests.count];
-    title.font = [UIFont boldSystemFontOfSize:16];
-    title.textColor = [UIColor labelColor];
-    [toolbar addSubview:title];
-    
-    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    clearBtn.frame = CGRectMake(NWScreenW - 120, 8, 50, 34);
-    [clearBtn setTitle:@"清空" forState:UIControlStateNormal];
-    [clearBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
-    clearBtn.titleLabel.font = [UIFont systemFontOfSize:15];
-    [clearBtn addTarget:[NSBlockOperation blockOperationWithBlock:^{
-        [NWLoggedRequests removeAllObjects];
-        title.text = @"Network Logger (0)";
-        [tableView reloadData];
-    }] forControlEvents:UIControlEventTouchUpInside];
-    [toolbar addSubview:clearBtn];
-    
-    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(NWScreenW - 60, 8, 50, 34);
-    [copyBtn setTitle:@"复制" forState:UIControlStateNormal];
-    [copyBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
-    copyBtn.titleLabel.font = [UIFont systemFontOfSize:15];
-    [copyBtn addTarget:[NSBlockOperation blockOperationWithBlock:^{
-        NWCopyAllLogs();
-    }] forControlEvents:UIControlEventTouchUpInside];
-    [toolbar addSubview:copyBtn];
-    
-    [container addSubview:toolbar];
-    
-    // UITableView
-    UITableView *tableView = [[UITableView alloc] initWithFrame:CGRectMake(0, toolbarH, NWScreenW, containerH - toolbarH)
-                                                          style:UITableViewStylePlain];
-    tableView.dataSource = (id)[[NWTableDS alloc] init];
-    tableView.delegate = (id)[[NWTableDelegate alloc] init];
-    tableView.rowHeight = UITableViewAutomaticDimension;
-    tableView.estimatedRowHeight = 60;
-    [container addSubview:tableView];
-    
-    [detailWindow addSubview:container];
-    
-    // 动画弹出
-    [UIView animateWithDuration:0.3 animations:^{
-        container.frame = CGRectMake(0, NWScreenH - containerH, NWScreenW, containerH);
-    }];
-}
-
-#pragma mark - UITableViewDataSource
-
-@interface NWTableDS : NSObject <UITableViewDataSource>
+@interface NWTableHelper : NSObject <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UIWindow *parentWindow;
+@property (nonatomic, strong) UIView *container;
 @end
 
-@implementation NWTableDS
+@implementation NWTableHelper
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return NWLoggedRequests.count;
@@ -313,12 +239,11 @@ static void NWShowDetailList(void) {
         cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     }
-    
+
     NWRequest *req = NWLoggedRequests[indexPath.row];
-    
     NSString *statusIcon = (req.statusCode >= 200 && req.statusCode < 300) ? @"✅" : @"❌";
     cell.textLabel.text = [NSString stringWithFormat:@"%@ %@ %@", statusIcon, req.method, req.url];
-    
+
     NSMutableString *detail = [NSMutableString string];
     [detail appendFormat:@"%ld | %.0fms", (long)req.statusCode, req.duration];
     if (req.responseBody.length > 0) {
@@ -328,18 +253,8 @@ static void NWShowDetailList(void) {
         [detail appendFormat:@"\n%@", preview];
     }
     cell.detailTextLabel.text = detail;
-    
     return cell;
 }
-
-@end
-
-#pragma mark - UITableViewDelegate
-
-@interface NWTableDelegate : NSObject <UITableViewDelegate>
-@end
-
-@implementation NWTableDelegate
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
@@ -349,6 +264,95 @@ static void NWShowDetailList(void) {
 
 @end
 
+#pragma mark - 详情列表
+
+static void NWShowDetailList(void) {
+    UIWindowScene *scene = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
+    }
+    if (!scene) return;
+
+    UIWindow *detailWindow = [[UIWindow alloc] initWithWindowScene:scene];
+    detailWindow.windowLevel = UIWindowLevelAlert + 200;
+    detailWindow.frame = [UIScreen mainScreen].bounds;
+    detailWindow.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
+    detailWindow.hidden = NO;
+
+    // helper 持有引用防止释放
+    NWTableHelper *helper = [NWTableHelper new];
+
+    // 半透明背景点击关闭
+    UIControl *bg = [[UIControl alloc] initWithFrame:detailWindow.bounds];
+    [bg addTarget:[NWBlockTarget withBlock:^{
+        [UIView animateWithDuration:0.25 animations:^{
+            helper.tableView.alpha = 0;
+            helper.container.alpha = 0;
+        } completion:^(BOOL f) {
+            detailWindow.hidden = YES;
+        }];
+    }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [detailWindow addSubview:bg];
+
+    // 内容容器
+    CGFloat containerH = NWScreenH * 0.75;
+    UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, NWScreenH, NWScreenW, containerH)];
+    container.backgroundColor = [UIColor systemBackgroundColor];
+    helper.container = container;
+
+    // 顶部工具栏
+    CGFloat toolbarH = 50;
+    UIView *toolbar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, NWScreenW, toolbarH)];
+    toolbar.backgroundColor = [UIColor secondarySystemBackgroundColor];
+
+    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, NWScreenW * 0.5, toolbarH)];
+    titleLabel.text = [NSString stringWithFormat:@"Network Logger (%lu)", (unsigned long)NWLoggedRequests.count];
+    titleLabel.font = [UIFont boldSystemFontOfSize:16];
+    titleLabel.textColor = [UIColor labelColor];
+    [toolbar addSubview:titleLabel];
+    helper.titleLabel = titleLabel;
+
+    UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    clearBtn.frame = CGRectMake(NWScreenW - 120, 8, 50, 34);
+    [clearBtn setTitle:@"清空" forState:UIControlStateNormal];
+    [clearBtn setTitleColor:[UIColor systemRedColor] forState:UIControlStateNormal];
+    clearBtn.titleLabel.font = [UIFont systemFontOfSize:15];
+    [clearBtn addTarget:[NWBlockTarget withBlock:^{
+        [NWLoggedRequests removeAllObjects];
+        titleLabel.text = @"Network Logger (0)";
+        [helper.tableView reloadData];
+    }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [toolbar addSubview:clearBtn];
+
+    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    copyBtn.frame = CGRectMake(NWScreenW - 60, 8, 50, 34);
+    [copyBtn setTitle:@"复制" forState:UIControlStateNormal];
+    [copyBtn setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    copyBtn.titleLabel.font = [UIFont systemFontOfSize:15];
+    [copyBtn addTarget:[NWBlockTarget withBlock:^{ NWCopyAllLogs(); }]
+            action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [toolbar addSubview:copyBtn];
+
+    [container addSubview:toolbar];
+
+    // UITableView
+    UITableView *tableView = [[UITableView alloc] initWithFrame:CGRectMake(0, toolbarH, NWScreenW, containerH - toolbarH)
+                                                          style:UITableViewStylePlain];
+    tableView.dataSource = helper;
+    tableView.delegate = helper;
+    tableView.rowHeight = UITableViewAutomaticDimension;
+    tableView.estimatedRowHeight = 60;
+    [container addSubview:tableView];
+    helper.tableView = tableView;
+
+    [detailWindow addSubview:container];
+
+    // 动画弹出
+    [UIView animateWithDuration:0.3 animations:^{
+        container.frame = CGRectMake(0, NWScreenH - containerH, NWScreenW, containerH);
+    }];
+}
+
 #pragma mark - 请求详情页
 
 static void NWShowRequestDetail(NWRequest *req) {
@@ -357,27 +361,24 @@ static void NWShowRequestDetail(NWRequest *req) {
         if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
     }
     if (!scene) return;
-    
+
     UIWindow *win = [[UIWindow alloc] initWithWindowScene:scene];
     win.windowLevel = UIWindowLevelAlert + 300;
     win.frame = [UIScreen mainScreen].bounds;
     win.backgroundColor = [UIColor systemBackgroundColor];
     win.hidden = NO;
-    
-    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 44, NWScreenW, NWScreenH - 44)];
-    scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
-    
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(0, 0, NWScreenW, NWScreenH - 44)];
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(0, 44, NWScreenW, NWScreenH - 44)];
     tv.editable = NO;
     tv.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
     tv.backgroundColor = [UIColor secondarySystemBackgroundColor];
     tv.textColor = [UIColor labelColor];
-    
+
     NSMutableString *text = [NSMutableString string];
     [text appendString:@"═══ REQUEST ═══\n"];
     [text appendFormat:@"%@ %@\n", req.method, req.url];
     [text appendFormat:@"Time: %@ (%.0fms)\n\n", req.timestamp, req.duration];
-    
+
     if (req.requestHeaders.count > 0) {
         [text appendString:@"── Request Headers ──\n"];
         for (NSString *key in req.requestHeaders) {
@@ -385,14 +386,12 @@ static void NWShowRequestDetail(NWRequest *req) {
         }
         [text appendString:@"\n"];
     }
-    
     if (req.requestBody.length > 0) {
         [text appendString:@"── Request Body ──\n"];
         [text appendFormat:@"%@\n\n", req.requestBody];
     }
-    
+
     [text appendFormat:@"═══ RESPONSE %ld ═══\n\n", (long)req.statusCode];
-    
     if (req.responseHeaders.count > 0) {
         [text appendString:@"── Response Headers ──\n"];
         for (NSString *key in req.responseHeaders) {
@@ -400,37 +399,36 @@ static void NWShowRequestDetail(NWRequest *req) {
         }
         [text appendString:@"\n"];
     }
-    
     if (req.responseBody.length > 0) {
         [text appendString:@"── Response Body ──\n"];
         [text appendString:req.responseBody];
     }
-    
     tv.text = text;
+
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 44, NWScreenW, NWScreenH - 44)];
+    scroll.contentSize = tv.frame.size;
     [scroll addSubview:tv];
     [win addSubview:scroll];
-    
+
     // 导航栏
     UIView *nav = [[UIView alloc] initWithFrame:CGRectMake(0, 0, NWScreenW, 44)];
     nav.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    
+
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     closeBtn.frame = CGRectMake(8, 4, 60, 36);
     [closeBtn setTitle:@"关闭" forState:UIControlStateNormal];
     closeBtn.titleLabel.font = [UIFont systemFontOfSize:16];
-    [closeBtn addTarget:[NSBlockOperation blockOperationWithBlock:^{
-        win.hidden = YES;
-    }] forControlEvents:UIControlEventTouchUpInside];
+    [closeBtn addTarget:[NWBlockTarget withBlock:^{ win.hidden = YES; }]
+             action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [nav addSubview:closeBtn];
-    
+
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     copyBtn.frame = CGRectMake(NWScreenW - 68, 4, 60, 36);
     [copyBtn setTitle:@"复制" forState:UIControlStateNormal];
     copyBtn.titleLabel.font = [UIFont systemFontOfSize:16];
-    [copyBtn addTarget:[NSBlockOperation blockOperationWithBlock:^{
+    [copyBtn addTarget:[NWBlockTarget withBlock:^{
         UIPasteboard.generalPasteboard.string = text;
-        // 简单 toast
-        UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(NWScreenW/2 - 60, NWScreenH/2, 120, 36)];
+        UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(NWScreenW / 2 - 50, NWScreenH / 2, 100, 36)];
         toast.text = @"已复制 ✅";
         toast.textAlignment = NSTextAlignmentCenter;
         toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
@@ -441,9 +439,9 @@ static void NWShowRequestDetail(NWRequest *req) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [toast removeFromSuperview];
         });
-    }] forControlEvents:UIControlEventTouchUpInside];
+    }] action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [nav addSubview:copyBtn];
-    
+
     [win addSubview:nav];
 }
 
@@ -452,46 +450,38 @@ static void NWShowRequestDetail(NWRequest *req) {
 static void NWCopyAllLogs(void) {
     NSMutableString *text = [NSMutableString string];
     [text appendFormat:@"NetworkLogger Export - %lu requests\n", (unsigned long)NWLoggedRequests.count];
-    [text appendFormat:@"Device: %@ | OS: %@\n\n", 
-        [[UIDevice currentDevice] model], 
+    [text appendFormat:@"Device: %@ | OS: %@\n\n",
+        [[UIDevice currentDevice] model],
         [[UIDevice currentDevice] systemVersion]];
-    
+
+    NSMutableArray *jsonArr = [NSMutableArray new];
+
     for (NSUInteger i = 0; i < NWLoggedRequests.count; i++) {
         NWRequest *req = NWLoggedRequests[i];
         [text appendFormat:@"────────── #%lu ──────────\n", (unsigned long)(i + 1)];
         [text appendFormat:@"%@ %@  [%ld] (%.0fms)\n", req.method, req.url, (long)req.statusCode, req.duration];
         [text appendFormat:@"Time: %@\n", req.timestamp];
-        
+
         if (req.requestHeaders.count > 0) {
             [text appendString:@"Request Headers:\n"];
             for (NSString *key in req.requestHeaders) {
                 [text appendFormat:@"  %@: %@\n", key, req.requestHeaders[key]];
             }
         }
-        
         if (req.requestBody.length > 0) {
             [text appendFormat:@"Request Body: %@\n", req.requestBody];
         }
-        
         if (req.responseHeaders.count > 0) {
             [text appendString:@"Response Headers:\n"];
             for (NSString *key in req.responseHeaders) {
                 [text appendFormat:@"  %@: %@\n", key, req.responseHeaders[key]];
             }
         }
-        
         if (req.responseBody.length > 0) {
             [text appendFormat:@"Response Body:\n%@\n", req.responseBody];
         }
-        
         [text appendString:@"\n"];
-    }
-    
-    [text appendFormat:@"═══ JSON ═══\n"];
-    
-    // 同时生成 JSON 格式
-    NSMutableArray *jsonArr = [NSMutableArray new];
-    for (NWRequest *req in NWLoggedRequests) {
+
         NSMutableDictionary *dict = [NSMutableDictionary new];
         dict[@"method"] = req.method;
         dict[@"url"] = req.url;
@@ -504,14 +494,15 @@ static void NWCopyAllLogs(void) {
         if (req.responseBody) dict[@"responseBody"] = req.responseBody;
         [jsonArr addObject:dict];
     }
-    
+
+    [text appendString:@"═══ JSON ═══\n"];
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:jsonArr options:NSJSONWritingPrettyPrinted error:nil];
     if (jsonData) {
         [text appendString:[[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding]];
     }
-    
+
     UIPasteboard.generalPasteboard.string = text;
-    
+
     // Toast
     UIWindowScene *scene = nil;
     for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
@@ -521,8 +512,8 @@ static void NWCopyAllLogs(void) {
     topWin.windowLevel = UIWindowLevelAlert + 400;
     topWin.frame = [UIScreen mainScreen].bounds;
     topWin.hidden = NO;
-    
-    UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(NWScreenW/2 - 100, NWScreenH/2, 200, 44)];
+
+    UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(NWScreenW / 2 - 100, NWScreenH / 2, 200, 44)];
     toast.text = [NSString stringWithFormat:@"已复制 %lu 条记录 ✅", (unsigned long)NWLoggedRequests.count];
     toast.textAlignment = NSTextAlignmentCenter;
     toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
@@ -530,7 +521,7 @@ static void NWCopyAllLogs(void) {
     toast.layer.cornerRadius = 12;
     toast.clipsToBounds = YES;
     [topWin addSubview:toast];
-    
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         topWin.hidden = YES;
     });
@@ -541,13 +532,10 @@ static void NWCopyAllLogs(void) {
 __attribute__((constructor))
 static void NWLoggerInit(void) {
     NSLog(@"[NetworkLogger] 插件已加载 - 开始监控网络请求");
-    
+
     NWLoggedRequests = [NSMutableArray new];
-    
-    // 注册 URL 拦截器
     [NSURLProtocol registerClass:[NWLogProtocol class]];
-    
-    // 延迟创建浮窗
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         NWCreateFloatingBadge();
     });
