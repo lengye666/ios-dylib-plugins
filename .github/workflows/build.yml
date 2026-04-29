@@ -79,7 +79,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: NetworkLogger.dylib
-        key: nw-${{ hashFiles('network-logger.m', 'fishhook.c') }}-v3
+        key: nw-${{ hashFiles('network-logger.m') }}-v4
     - name: Build
       run: |
         if [ -f "NetworkLogger.dylib" ]; then
@@ -90,9 +90,9 @@ jobs:
             -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
             -target arm64-apple-ios14.0 \
             -shared -dynamiclib \
-            -framework Foundation -framework UIKit -framework CoreGraphics -framework CFNetwork \
+            -framework Foundation -framework UIKit -framework CoreGraphics \
             -fobjc-arc \
-            -o NetworkLogger.dylib network-logger.m fishhook.c
+            -o NetworkLogger.dylib network-logger.m
           lipo -info NetworkLogger.dylib
         fi
     - uses: actions/upload-artifact@v4

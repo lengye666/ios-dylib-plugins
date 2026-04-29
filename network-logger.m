@@ -2,13 +2,9 @@
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
-#import <dlfcn.h>
-#include "fishhook.h"
 
 // ==========================================
-// NetworkLogger v2 - 全层级网络请求监控
-// Layer 1: NSURLProtocol (NSURLSession / NSURLConnection)
-// Layer 2: fishhook CFNetwork (CFHTTPMessage / CFReadStream)
+// NetworkLogger v3 - Safe session swizzle + UI
 // ==========================================
 
 #pragma mark - Block Target Wrapper
@@ -49,7 +45,6 @@ static void NWRetainObj(id obj) {
 @property (nonatomic, strong) NSString *responseBody;
 @property (nonatomic, strong) NSString *timestamp;
 @property (nonatomic, assign) double duration;
-@property (nonatomic, strong) NSString *source; // "NSURLSession" or "CFNetwork"
 @end
 
 @implementation NWRequest @end
@@ -65,15 +60,7 @@ static void NWCopyAllLogs(void);
 static void NWShowDetail(NWRequest *req);
 static NSString *NWTimeStr(NSDate *date);
 
-#pragma mark - Helper: record request on main thread
-
-static void NWRecordOnMain(NWRequest *req) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [gRequests addObject:req];
-    });
-}
-
-#pragma mark ======== Layer 1: NSURLProtocol ========
+#pragma mark - NSURLProtocol Interceptor
 
 @interface NWLogProtocol : NSURLProtocol <NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSURLSessionDataTask *task;
@@ -95,7 +82,6 @@ static void NWRecordOnMain(NWRequest *req) {
     NSMutableURLRequest *req = [self.request mutableCopy];
     [NSURLProtocol setProperty:@YES forKey:@"NWLogged" inRequest:req];
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    cfg.connectionProxyDictionary = @{};
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg delegate:self delegateQueue:[NSOperationQueue mainQueue]];
     self.respData = [NSMutableData data];
     self.startTime = [NSDate date];
@@ -114,7 +100,6 @@ static void NWRecordOnMain(NWRequest *req) {
     e.responseHeaders = ((NSHTTPURLResponse *)resp).allHeaderFields;
     e.requestHeaders = self.request.allHTTPHeaderFields;
     e.timestamp = NWTimeStr([NSDate date]);
-    e.source = @"NSURLSession";
     if (self.request.HTTPBody) {
         NSData *body = self.request.HTTPBody.length > 2048
             ? [self.request.HTTPBody subdataWithRange:NSMakeRange(0, 2048)] : self.request.HTTPBody;
@@ -146,92 +131,51 @@ static void NWRecordOnMain(NWRequest *req) {
 }
 @end
 
-#pragma mark - Session Swizzle (safe: only hook session creation, not getter)
+#pragma mark - Safe Session Swizzle (using metaclass for + methods)
 
 static void NWSwizzleSession(void) {
-    Class cls = [NSURLSession class];
-    SEL origSel = @selector(sessionWithConfiguration:delegate:delegateQueue:);
-    Method origMethod = class_getInstanceMethod(cls, origSel);
-    IMP origIMP = method_getImplementation(origMethod);
+    // sessionWithConfiguration:delegate:delegateQueue: is a CLASS method
+    // Must use metaclass to hook it
+    Class metaCls = object_getClass([NSURLSession class]);
 
-    IMP newIMP = imp_implementationWithBlock(^id(id self, NSURLSessionConfiguration *config, id delegate, NSOperationQueue *queue) {
-        if (config) {
-            NSMutableArray *classes = [NSMutableArray arrayWithArray:config.protocolClasses ?: @[]];
-            if (![classes containsObject:[NWLogProtocol class]]) {
-                [classes insertObject:[NWLogProtocol class] atIndex:0];
+    SEL sel1 = @selector(sessionWithConfiguration:delegate:delegateQueue:);
+    Method m1 = class_getInstanceMethod(metaCls, sel1);
+    if (m1) {
+        IMP origIMP = method_getImplementation(m1);
+        IMP newIMP = imp_implementationWithBlock(^id(id self, NSURLSessionConfiguration *config, id delegate, NSOperationQueue *queue) {
+            if (config) {
+                NSMutableArray *classes = [NSMutableArray arrayWithArray:config.protocolClasses ?: @[]];
+                if (![classes containsObject:[NWLogProtocol class]]) {
+                    [classes insertObject:[NWLogProtocol class] atIndex:0];
+                }
+                config.protocolClasses = [classes copy];
             }
-            config.protocolClasses = [classes copy];
-        }
-        return ((id (*)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *))origIMP)(self, origSel, config, delegate, queue);
-    });
-    method_setImplementation(origMethod, newIMP);
+            return ((id (*)(id, SEL, NSURLSessionConfiguration *, id, NSOperationQueue *))origIMP)(self, sel1, config, delegate, queue);
+        });
+        method_setImplementation(m1, newIMP);
+        NSLog(@"[NW] Hooked sessionWithConfiguration:delegate:delegateQueue:");
+    }
 
-    // Also hook +sessionWithConfiguration: (no delegate)
     SEL sel2 = @selector(sessionWithConfiguration:);
-    Method m2 = class_getInstanceMethod(cls, sel2);
-    IMP imp2 = method_getImplementation(m2);
-    IMP newImp2 = imp_implementationWithBlock(^id(id self, NSURLSessionConfiguration *config) {
-        if (config) {
-            NSMutableArray *classes = [NSMutableArray arrayWithArray:config.protocolClasses ?: @[]];
-            if (![classes containsObject:[NWLogProtocol class]]) {
-                [classes insertObject:[NWLogProtocol class] atIndex:0];
+    Method m2 = class_getInstanceMethod(metaCls, sel2);
+    if (m2) {
+        IMP origIMP2 = method_getImplementation(m2);
+        IMP newIMP2 = imp_implementationWithBlock(^id(id self, NSURLSessionConfiguration *config) {
+            if (config) {
+                NSMutableArray *classes = [NSMutableArray arrayWithArray:config.protocolClasses ?: @[]];
+                if (![classes containsObject:[NWLogProtocol class]]) {
+                    [classes insertObject:[NWLogProtocol class] atIndex:0];
+                }
+                config.protocolClasses = [classes copy];
             }
-            config.protocolClasses = [classes copy];
-        }
-        return ((id (*)(id, SEL, NSURLSessionConfiguration *))imp2)(self, sel2, config);
-    });
-    method_setImplementation(m2, newImp2);
+            return ((id (*)(id, SEL, NSURLSessionConfiguration *))origIMP2)(self, sel2, config);
+        });
+        method_setImplementation(m2, newIMP2);
+        NSLog(@"[NW] Hooked sessionWithConfiguration:");
+    }
 }
 
-#pragma mark ======== Layer 2: CFNetwork fishhook ========
-
-// Original function pointers
-static CFHTTPMessageRef (*orig_CFHTTPMessageCreateRequest)(CFAllocatorRef, CFStringRef, CFURLRef, CFStringRef);
-static CFHTTPMessageRef (*orig_CFHTTPMessageCreateResponse)(CFAllocatorRef, CFIndex, CFStringRef, CFStringRef);
-
-static CFHTTPMessageRef hook_CFHTTPMessageCreateRequest(CFAllocatorRef alloc, CFStringRef method, CFURLRef url, CFStringRef version) {
-    CFHTTPMessageRef result = orig_CFHTTPMessageCreateRequest(alloc, method, url, version);
-
-    NSString *urlStr = (__bridge NSString *)CFURLGetString(url);
-    NSString *methodStr = (__bridge NSString *)method;
-
-    NWRequest *entry = [NWRequest new];
-    entry.url = urlStr;
-    entry.method = methodStr;
-    entry.timestamp = NWTimeStr([NSDate date]);
-    entry.source = @"CFNetwork";
-    NWRecordOnMain(entry);
-
-    return result;
-}
-
-static CFHTTPMessageRef hook_CFHTTPMessageCreateResponse(CFAllocatorRef alloc, CFIndex statusCode, CFStringRef statusDescription, CFStringRef httpVersion) {
-    CFHTTPMessageRef result = orig_CFHTTPMessageCreateResponse(alloc, statusCode, statusDescription, httpVersion);
-
-    // Try to update the latest CFNetwork request with status code
-    dispatch_async(dispatch_get_main_queue(), ^{
-        for (NSInteger i = gRequests.count - 1; i >= 0; i--) {
-            NWRequest *r = gRequests[i];
-            if ([r.source isEqualToString:@"CFNetwork"] && r.statusCode == 0) {
-                r.statusCode = (NSInteger)statusCode;
-                break;
-            }
-        }
-    });
-
-    return result;
-}
-
-static void NWHookCFNetwork(void) {
-    struct rebinding rebindings[] = {
-        {"CFHTTPMessageCreateRequest", (void *)hook_CFHTTPMessageCreateRequest, (void **)&orig_CFHTTPMessageCreateRequest},
-        {"CFHTTPMessageCreateResponse", (void *)hook_CFHTTPMessageCreateResponse, (void **)&orig_CFHTTPMessageCreateResponse},
-    };
-    rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
-    NSLog(@"[NetworkLogger] CFNetwork hooked via fishhook");
-}
-
-#pragma mark - Date Formatter
+#pragma mark - Date
 
 static NSString *NWTimeStr(NSDate *date) {
     static NSDateFormatter *fmt = nil;
@@ -260,13 +204,12 @@ static NSString *NWTimeStr(NSDate *date) {
 }
 @end
 
-#pragma mark - Table DataSource/Delegate
+#pragma mark - Table Helper
 
 @interface NWTblHelper : NSObject <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIView *container;
-@property (nonatomic, strong) UIWindow *win;
 @end
 
 @implementation NWTblHelper
@@ -287,9 +230,8 @@ static NSString *NWTimeStr(NSDate *date) {
     }
     NWRequest *r = gRequests[ip.row];
     NSString *icon = (r.statusCode >= 200 && r.statusCode < 400) ? @"\u2705" : (r.statusCode >= 400 ? @"\u274C" : @"\U0001F4E1");
-    NSString *src = [r.source isEqualToString:@"CFNetwork"] ? @" [CF]" : @" [NS]";
-    c.textLabel.text = [NSString stringWithFormat:@"%@ %@ %@%@", icon, r.method, r.url, src];
-    NSMutableString *sub = [NSMutableString stringWithFormat:@"%ld | %.0fms%@", (long)r.statusCode, r.duration, src];
+    c.textLabel.text = [NSString stringWithFormat:@"%@ %@ %@", icon, r.method, r.url];
+    NSMutableString *sub = [NSMutableString stringWithFormat:@"%ld | %.0fms", (long)r.statusCode, r.duration];
     if (r.responseBody.length > 0) {
         NSString *p = r.responseBody.length > 60
             ? [[r.responseBody substringToIndex:60] stringByAppendingString:@"..."] : r.responseBody;
@@ -338,8 +280,7 @@ static void NWCreateBadge(void) {
     [gBadge setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 
     NWDragHandler *dh = [NWDragHandler new];
-    dh.window = gFloatWin;
-    dh.btnSize = CGSizeMake(sz, sz);
+    dh.window = gFloatWin; dh.btnSize = CGSizeMake(sz, sz);
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:dh action:@selector(handlePan:)];
     [gBadge addGestureRecognizer:pan];
     NWRetainObj(dh);
@@ -368,7 +309,6 @@ static void NWShowDetailList(void) {
     win.hidden = NO;
 
     NWTblHelper *helper = [NWTblHelper new];
-    helper.win = win;
     NWRetainObj(helper);
 
     UIControl *bg = [[UIControl alloc] initWithFrame:win.bounds];
@@ -395,10 +335,8 @@ static void NWShowDetailList(void) {
 
     CGFloat bottomH = 50 + safeBottom;
     UITableView *tbl = [[UITableView alloc] initWithFrame:CGRectMake(0, topH, gScrW, cH - topH - bottomH) style:UITableViewStylePlain];
-    tbl.dataSource = helper;
-    tbl.delegate = helper;
-    tbl.rowHeight = UITableViewAutomaticDimension;
-    tbl.estimatedRowHeight = 60;
+    tbl.dataSource = helper; tbl.delegate = helper;
+    tbl.rowHeight = UITableViewAutomaticDimension; tbl.estimatedRowHeight = 60;
     [container addSubview:tbl];
     helper.tableView = tbl;
 
@@ -446,25 +384,14 @@ static void NWShowDetail(NWRequest *req) {
     NWRetainObj(win);
 
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"[%@] === REQUEST ===\n", req.source];
+    [text appendFormat:@"=== REQUEST ===\n"];
     [text appendFormat:@"%@ %@\n", req.method, req.url];
     [text appendFormat:@"Time: %@ (%.0fms)\n\n", req.timestamp, req.duration];
-    if (req.requestHeaders.count > 0) {
-        [text appendString:@"-- Request Headers --\n"];
-        for (NSString *k in req.requestHeaders) [text appendFormat:@"%@: %@\n", k, req.requestHeaders[k]];
-        [text appendString:@"\n"];
-    }
-    if (req.requestBody.length > 0) { [text appendFormat:@"-- Request Body --\n%@\n\n", req.requestBody]; }
+    if (req.requestHeaders.count > 0) { [text appendString:@"-- Req Headers --\n"]; for (NSString *k in req.requestHeaders) [text appendFormat:@"%@: %@\n", k, req.requestHeaders[k]]; [text appendString:@"\n"]; }
+    if (req.requestBody.length > 0) { [text appendFormat:@"-- Req Body --\n%@\n\n", req.requestBody]; }
     [text appendFormat:@"=== RESPONSE %ld ===\n\n", (long)req.statusCode];
-    if (req.responseHeaders.count > 0) {
-        [text appendString:@"-- Response Headers --\n"];
-        for (NSString *k in req.responseHeaders) [text appendFormat:@"%@: %@\n", k, req.responseHeaders[k]];
-        [text appendString:@"\n"];
-    }
-    if (req.responseBody.length > 0) { [text appendString:@"-- Response Body --\n"]; [text appendString:req.responseBody]; }
-    if (req.statusCode == 0 && req.duration == 0) {
-        [text appendString:@"\n(CFNetwork request - URL logged via hook, response body not captured)"];
-    }
+    if (req.responseHeaders.count > 0) { [text appendString:@"-- Resp Headers --\n"]; for (NSString *k in req.responseHeaders) [text appendFormat:@"%@: %@\n", k, req.responseHeaders[k]]; [text appendString:@"\n"]; }
+    if (req.responseBody.length > 0) { [text appendString:@"-- Resp Body --\n"]; [text appendString:req.responseBody]; }
 
     UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(0, 0, gScrW, gScrH - 90)];
     tv.editable = NO;
@@ -474,7 +401,6 @@ static void NWShowDetail(NWRequest *req) {
     tv.text = text;
     [win addSubview:tv];
 
-    // Bottom nav bar (easy to reach with thumb)
     CGFloat bottomH = 50 + 34;
     UIView *bottomNav = [[UIView alloc] initWithFrame:CGRectMake(0, gScrH - bottomH, gScrW, bottomH)];
     bottomNav.backgroundColor = [UIColor secondarySystemBackgroundColor];
@@ -489,11 +415,9 @@ static void NWShowDetail(NWRequest *req) {
     [copyBtn addTarget:NWSafeTarget(^{
         UIPasteboard.generalPasteboard.string = text;
         UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(gScrW/2 - 50, gScrH/2, 100, 36)];
-        toast.text = @"Copied!";
-        toast.textAlignment = NSTextAlignmentCenter;
+        toast.text = @"Copied!"; toast.textAlignment = NSTextAlignmentCenter;
         toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
-        toast.textColor = [UIColor whiteColor];
-        toast.layer.cornerRadius = 8; toast.clipsToBounds = YES;
+        toast.textColor = [UIColor whiteColor]; toast.layer.cornerRadius = 8; toast.clipsToBounds = YES;
         [win addSubview:toast];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [toast removeFromSuperview]; });
     }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
@@ -515,36 +439,31 @@ static void NWShowDetail(NWRequest *req) {
 
 static void NWCopyAllLogs(void) {
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"NetworkLogger v2 - %lu requests\nDevice: %@ | OS: %@\n\n",
+    [text appendFormat:@"NetworkLogger - %lu requests\nDevice: %@ | OS: %@\n\n",
         (unsigned long)gRequests.count, [[UIDevice currentDevice] model], [[UIDevice currentDevice] systemVersion]];
-
     NSMutableArray *jsonArr = [NSMutableArray new];
     for (NSUInteger i = 0; i < gRequests.count; i++) {
         NWRequest *r = gRequests[i];
         [text appendFormat:@"-------- #%lu --------\n", (unsigned long)(i+1)];
-        [text appendFormat:@"[%@] %@ %@ [%ld] (%.0fms)\n", r.source, r.method, r.url, (long)r.statusCode, r.duration];
+        [text appendFormat:@"%@ %@ [%ld] (%.0fms)\n", r.method, r.url, (long)r.statusCode, r.duration];
         [text appendFormat:@"Time: %@\n", r.timestamp];
-        if (r.requestHeaders.count > 0) { [text appendString:@"Req Headers:\n"]; for (NSString *k in r.requestHeaders) [text appendFormat:@"  %@: %@\n", k, r.requestHeaders[k]]; }
-        if (r.requestBody.length > 0) [text appendFormat:@"Req Body: %@\n", r.requestBody];
-        if (r.responseHeaders.count > 0) { [text appendString:@"Resp Headers:\n"]; for (NSString *k in r.responseHeaders) [text appendFormat:@"  %@: %@\n", k, r.responseHeaders[k]]; }
-        if (r.responseBody.length > 0) [text appendFormat:@"Resp Body:\n%@\n", r.responseBody];
+        if (r.requestHeaders.count > 0) { [text appendString:@"Req H:\n"]; for (NSString *k in r.requestHeaders) [text appendFormat:@"  %@: %@\n", k, r.requestHeaders[k]]; }
+        if (r.requestBody.length > 0) [text appendFormat:@"Req B: %@\n", r.requestBody];
+        if (r.responseHeaders.count > 0) { [text appendString:@"Resp H:\n"]; for (NSString *k in r.responseHeaders) [text appendFormat:@"  %@: %@\n", k, r.responseHeaders[k]]; }
+        if (r.responseBody.length > 0) [text appendFormat:@"Resp B:\n%@\n", r.responseBody];
         [text appendString:@"\n"];
-
         NSMutableDictionary *d = [NSMutableDictionary new];
-        d[@"source"] = r.source ?: @"";
         d[@"method"] = r.method; d[@"url"] = r.url; d[@"status"] = @(r.statusCode);
         d[@"timestamp"] = r.timestamp; d[@"duration_ms"] = @(r.duration);
-        if (r.requestHeaders) d[@"requestHeaders"] = r.requestHeaders;
-        if (r.responseHeaders) d[@"responseHeaders"] = r.responseHeaders;
-        if (r.requestBody) d[@"requestBody"] = r.requestBody;
-        if (r.responseBody) d[@"responseBody"] = r.responseBody;
+        if (r.requestHeaders) d[@"reqH"] = r.requestHeaders;
+        if (r.responseHeaders) d[@"respH"] = r.responseHeaders;
+        if (r.requestBody) d[@"reqB"] = r.requestBody;
+        if (r.responseBody) d[@"respB"] = r.responseBody;
         [jsonArr addObject:d];
     }
-
     [text appendString:@"=== JSON ===\n"];
     NSData *jd = [NSJSONSerialization dataWithJSONObject:jsonArr options:NSJSONWritingPrettyPrinted error:nil];
     if (jd) [text appendString:[[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding]];
-
     UIPasteboard.generalPasteboard.string = text;
 
     UIWindowScene *scene = nil;
@@ -552,14 +471,12 @@ static void NWCopyAllLogs(void) {
         if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
     UIWindow *tw = [[UIWindow alloc] initWithWindowScene:scene];
     tw.windowLevel = UIWindowLevelAlert + 400;
-    tw.frame = [UIScreen mainScreen].bounds;
-    tw.hidden = NO;
+    tw.frame = [UIScreen mainScreen].bounds; tw.hidden = NO;
     UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(gScrW/2 - 100, gScrH/2, 200, 44)];
     toast.text = [NSString stringWithFormat:@"Copied %lu!", (unsigned long)gRequests.count];
     toast.textAlignment = NSTextAlignmentCenter;
     toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
-    toast.textColor = [UIColor whiteColor];
-    toast.layer.cornerRadius = 12; toast.clipsToBounds = YES;
+    toast.textColor = [UIColor whiteColor]; toast.layer.cornerRadius = 12; toast.clipsToBounds = YES;
     [tw addSubview:toast];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ tw.hidden = YES; });
 }
@@ -568,16 +485,14 @@ static void NWCopyAllLogs(void) {
 
 __attribute__((constructor))
 static void NWLoggerInit(void) {
-    NSLog(@"[NetworkLogger] v2 loaded - NSURLProtocol + CFNetwork fishhook");
-
+    NSLog(@"[NetworkLogger] v3 loading...");
     gRequests = [NSMutableArray new];
 
-    // Layer 1: NSURLProtocol for NSURLSession
+    // Register protocol globally (catches default sessions)
     [NSURLProtocol registerClass:[NWLogProtocol class]];
-    NWSwizzleSession();
 
-    // Layer 2: fishhook for CFNetwork (libpartial, etc.)
-    NWHookCFNetwork();
+    // Swizzle NSURLSession class methods via metaclass
+    NWSwizzleSession();
 
     // UI
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
