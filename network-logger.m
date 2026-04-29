@@ -447,7 +447,7 @@ static void NWShowDetail(NWRequest *req) {
         [text appendString:@"\n(CFNetwork request - URL logged via hook, response body not captured)"];
     }
 
-    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(0, 44, gScrW, gScrH - 44)];
+    UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(0, 0, gScrW, gScrH - 90)];
     tv.editable = NO;
     tv.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
     tv.backgroundColor = [UIColor secondarySystemBackgroundColor];
@@ -455,20 +455,18 @@ static void NWShowDetail(NWRequest *req) {
     tv.text = text;
     [win addSubview:tv];
 
-    UIView *nav = [[UIView alloc] initWithFrame:CGRectMake(0, 0, gScrW, 44)];
-    nav.backgroundColor = [UIColor secondarySystemBackgroundColor];
-
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(8, 4, 60, 36);
-    [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
-    closeBtn.titleLabel.font = [UIFont systemFontOfSize:16];
-    [closeBtn addTarget:NWSafeTarget(^{ win.hidden = YES; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-    [nav addSubview:closeBtn];
+    // Bottom nav bar (easy to reach with thumb)
+    CGFloat bottomH = 50 + 34;
+    UIView *bottomNav = [[UIView alloc] initWithFrame:CGRectMake(0, gScrH - bottomH, gScrW, bottomH)];
+    bottomNav.backgroundColor = [UIColor secondarySystemBackgroundColor];
 
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(gScrW - 68, 4, 60, 36);
+    copyBtn.frame = CGRectMake(gScrW / 2 - 110, 34, 100, 40);
     [copyBtn setTitle:@"Copy" forState:UIControlStateNormal];
-    copyBtn.titleLabel.font = [UIFont systemFontOfSize:16];
+    copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    copyBtn.backgroundColor = [UIColor systemBlueColor];
+    [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    copyBtn.layer.cornerRadius = 8;
     [copyBtn addTarget:NWSafeTarget(^{
         UIPasteboard.generalPasteboard.string = text;
         UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(gScrW/2 - 50, gScrH/2, 100, 36)];
@@ -480,8 +478,18 @@ static void NWShowDetail(NWRequest *req) {
         [win addSubview:toast];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [toast removeFromSuperview]; });
     }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-    [nav addSubview:copyBtn];
-    [win addSubview:nav];
+    [bottomNav addSubview:copyBtn];
+
+    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeBtn.frame = CGRectMake(gScrW / 2 + 10, 34, 100, 40);
+    [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    closeBtn.backgroundColor = [UIColor systemGrayColor];
+    [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    closeBtn.layer.cornerRadius = 8;
+    [closeBtn addTarget:NWSafeTarget(^{ win.hidden = YES; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomNav addSubview:closeBtn];
+    [win addSubview:bottomNav];
 }
 
 #pragma mark - Copy All
