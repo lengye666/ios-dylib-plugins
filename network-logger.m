@@ -260,6 +260,69 @@ static void NWSwizzleSession(void) {
     }
 }
 
+#pragma mark - Task-Level Swizzle (VPN-safe fallback)
+
+// Swizzle dataTaskWithRequest:completion: on NSURLSession to capture requests
+// at the task creation level. This works even when NSURLProtocol fails (VPN/etc).
+static void NWSwizzleTasks(void) {
+    // Instance method: dataTaskWithRequest:completionHandler:
+    SEL sel1 = @selector(dataTaskWithRequest:completionHandler:);
+    Method mt1 = class_getInstanceMethod([NSURLSession class], sel1);
+    if (mt1) {
+        IMP origIMP = method_getImplementation(mt1);
+        IMP newIMP = imp_implementationWithBlock(^NSURLSessionDataTask *(NSURLSession *sess, NSURLRequest *req, void (^origCompletion)(NSData *, NSURLResponse *, NSError *)) {
+            __block NSDate *start = [NSDate date];
+            NSString *ts = NWTimeStr([NSDate date]);
+
+            void (^wrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+                double dur = [[NSDate date] timeIntervalSinceDate:start] * 1000;
+                NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
+
+                if (gIsSubprocess) {
+                    NSString *line = [NSString stringWithFormat:@"[%s] %@ %@ → %ld\n", ts.UTF8String, req.HTTPMethod ?: @"GET", req.URL.absoluteString, (long)(http ? http.statusCode : 0)];
+                    NWWriteSubLog(line);
+                } else {
+                    NWRequest *e = [NWRequest new];
+                    e.url = req.URL.absoluteString;
+                    e.method = req.HTTPMethod ?: @"GET";
+                    e.statusCode = http ? http.statusCode : (err ? -1 : 0);
+                    e.responseHeaders = http ? http.allHeaderFields : nil;
+                    e.requestHeaders = req.allHTTPHeaderFields;
+                    e.timestamp = ts;
+                    e.duration = dur;
+                    if (req.HTTPBody && req.HTTPBody.length > 0) {
+                        NSData *body = req.HTTPBody.length > 2048 ? [req.HTTPBody subdataWithRange:NSMakeRange(0, 2048)] : req.HTTPBody;
+                        e.requestBody = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"[binary]";
+                    }
+                    if (data && data.length > 0) {
+                        NSData *d = data.length > 10240 ? [data subdataWithRange:NSMakeRange(0, 10240)] : data;
+                        e.responseBody = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"[binary]";
+                    }
+                    if (err) e.responseBody = [NSString stringWithFormat:@"[ERROR] %@", err.localizedDescription];
+                    [gRequests addObject:e];
+                }
+
+                if (origCompletion) origCompletion(data, resp, err);
+            };
+
+            return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))origIMP)(sess, sel1, req, wrapped);
+        });
+        method_setImplementation(mt1, newIMP);
+    }
+
+    // Instance method: dataTaskWithURL:completionHandler:
+    SEL sel2 = @selector(dataTaskWithURL:completionHandler:);
+    Method mt2 = class_getInstanceMethod([NSURLSession class], sel2);
+    if (mt2) {
+        IMP origIMP2 = method_getImplementation(mt2);
+        IMP newIMP2 = imp_implementationWithBlock(^NSURLSessionDataTask *(NSURLSession *sess, NSURL *url, void (^origCompletion)(NSData *, NSURLResponse *, NSError *)) {
+            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+            return [sess dataTaskWithRequest:req completionHandler:origCompletion];
+        });
+        method_setImplementation(mt2, newIMP2);
+    }
+}
+
 #pragma mark - Hook Process to inject DYLD_INSERT_LIBRARIES
 
 static void NWHookProcess(void) {
@@ -690,6 +753,7 @@ static void NWLoggerInit(void) {
     // Network hooks (work in both UI and subprocess mode)
     [NSURLProtocol registerClass:[NWLogProtocol class]];
     NWSwizzleSession();
+    NWSwizzleTasks();  // VPN-safe fallback: intercept at task creation level
 
     if (NWHasUIKit()) {
         // === UI PROCESS MODE ===
