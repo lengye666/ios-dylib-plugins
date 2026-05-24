@@ -159,90 +159,92 @@ static BOOL WriteByPassFlag(NSString *code) {
 
 #pragma mark - UIAlert 拦截：劫持 haode 的激活弹窗
 
-// 保存原始实现
-static void (*Orig_addAction)(id, SEL, id) = NULL;
 static BOOL gAlertHooked = NO;
+static BOOL gProcessingActivation = NO;
+
+static void ShowTip(NSString *title, NSString *msg) {
+    // 找到当前最顶层的 VC
+    UIViewController *topVC = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            topVC = ws.windows.firstObject.rootViewController;
+            if (topVC) break;
+        }
+    }
+    while (topVC.presentedViewController) topVC = topVC.presentedViewController;
+
+    UIAlertController *tip = [UIAlertController alertControllerWithTitle:title
+        message:msg preferredStyle:UIAlertControllerStyleAlert];
+    [tip addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+    [topVC presentViewController:tip animated:YES completion:nil];
+}
+
+static void HandleActivationCode(UIAlertController *alert, NSString *inputCode) {
+    if (gProcessingActivation) return;
+    gProcessingActivation = YES;
+
+    NSLog(@"[HK-Bridge] 用户输入验证码: %@", inputCode);
+
+    if (inputCode.length == 0) {
+        gProcessingActivation = NO;
+        ShowTip(@"提示", @"请输入验证码");
+        return;
+    }
+
+    VerifyKami(inputCode, ^(BOOL success, NSString *msg) {
+        if (success) {
+            WriteByPassFlag(inputCode);
+
+            // 关掉 haode 的弹窗
+            [alert dismissViewControllerAnimated:YES completion:^{
+                ShowTip(@"🎉 激活成功", @"卡密验证通过，功能已激活！");
+            }];
+        } else {
+            ShowTip(@"激活失败", msg);
+        }
+        gProcessingActivation = NO;
+    });
+}
+
+// Swizzle UIAlertController 的 addAction: 来拦截激活按钮
+static void (*Orig_addAction)(id, SEL, id) = NULL;
 
 static void Hooked_addAction(id self, SEL _cmd, UIAlertAction *action) {
     UIAlertController *alert = (UIAlertController *)self;
 
-    // 检测是否是 haode 的激活弹窗（标题含"验证码"或"激活"）
+    // 检测是否是 haode 的激活弹窗
     NSString *title = alert.title ?: @"";
     NSString *message = alert.message ?: @"";
+    BOOL isKamiAlert = [title containsString:@"验证码"] || [title containsString:@"激活"] ||
+                       [message containsString:@"验证码"] || [message containsString:@"激活"] ||
+                       [title containsString:@"荣耀"];
 
-    if ([title containsString:@"验证码"] || [title containsString:@"激活"] ||
-        [message containsString:@"验证码"] || [message containsString:@"激活"] ||
-        [title containsString:@"荣耀"]) {
+    if (isKamiAlert) {
+        NSString *btnTitle = [action valueForKey:@"title"] ?: @"";
+        BOOL isActivateBtn = [btnTitle containsString:@"激活"] || [btnTitle containsString:@"确认"] ||
+                             [btnTitle isEqualToString:@"OK"] || [btnTitle isEqualToString:@"确定"];
 
-        NSLog(@"[HK-Bridge] 检测到激活弹窗: title=%@", title);
+        if (isActivateBtn && action.style != UIAlertActionStyleDestructive) {
+            NSLog(@"[HK-Bridge] 拦截激活按钮: %@ → 替换为 kami 验证", btnTitle);
 
-        // 只拦截"激活"按钮（默认样式通常是 confirm）
-        if (action.style == UIAlertActionStyleDefault || action.style == UIAlertActionStyleCancel) {
-            NSString *btnTitle = [action valueForKey:@"title"] ?: @"";
-            if ([btnTitle containsString:@"激活"] || [btnTitle containsString:@"确认"] ||
-                [btnTitle isEqualToString:@"OK"] || [btnTitle isEqualToString:@"确定"]) {
-
-                NSLog(@"[HK-Bridge] 拦截激活按钮: %@", btnTitle);
-
-                // 替换 action 为我们的 handler
-                // 获取原始 handler
-                id originalHandler = [action valueForKey:@"handler"];
-                __weak UIAlertController *weakAlert = alert;
-
-                // 用 runtime 替换 UIAlertAction 的 handler
-                SEL handlerSel = NSSelectorFromString(@"setHandler:");
-                IMP newIMP = imp_implementationWithBlock(^(id _self, void (^block)(UIAlertAction *)) {
-                    void (^newBlock)(UIAlertAction *) = ^(UIAlertAction *_action) {
-                        // 读取用户输入的验证码
-                        NSString *inputCode = @"";
-                        NSArray *textFields = [weakAlert textFields];
-                        if (textFields.count > 0) {
-                            inputCode = [(UITextField *)textFields[0] text] ?: @"";
-                        }
-
-                        NSLog(@"[HK-Bridge] 用户输入验证码: %@", inputCode);
-
-                        if (inputCode.length == 0) {
-                            // 弹窗提示
-                            UIAlertController *tip = [UIAlertController alertControllerWithTitle:@"提示"
-                                message:@"请输入验证码" preferredStyle:UIAlertControllerStyleAlert];
-                            [tip addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                            [weakAlert presentViewController:tip animated:YES completion:nil];
-                            return;
-                        }
-
-                        // 调你的卡密验证
-                        VerifyKami(inputCode, ^(BOOL success, NSString *msg) {
-                            if (success) {
-                                WriteByPassFlag(inputCode);
-                                [weakAlert dismissViewControllerAnimated:YES completion:nil];
-
-                                // 提示成功
-                                UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
-                                UIAlertController *succ = [UIAlertController alertControllerWithTitle:@"🎉 激活成功"
-                                    message:@"卡密验证通过，功能已激活！" preferredStyle:UIAlertControllerStyleAlert];
-                                [succ addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                                [rootVC presentViewController:succ animated:YES completion:nil];
-                            } else {
-                                // 验证失败，让 haode 的原始弹窗继续显示
-                                UIAlertController *tip = [UIAlertController alertControllerWithTitle:@"激活失败"
-                                    message:msg preferredStyle:UIAlertControllerStyleAlert];
-                                [tip addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                                [weakAlert presentViewController:tip animated:YES completion:nil];
-                            }
-                        });
-                    };
-                    // 调用原始的 setHandler: 但传入我们的 block
-                    ((void (*)(id, SEL, void(^)(UIAlertAction *)))origIMP)(_self, handlerSel, newBlock);
-                });
-                method_setImplementation(class_getInstanceMethod([UIAlertAction class], handlerSel), newIMP);
-                return;
-            }
+            // 不添加原始 action，换成我们自己的
+            UIAlertAction *ourAction = [UIAlertAction actionWithTitle:btnTitle
+                style:UIAlertActionStyleDefault
+                handler:^(UIAlertAction *_action) {
+                    NSString *code = @"";
+                    if (alert.textFields.count > 0) {
+                        code = [alert.textFields[0] text] ?: @"";
+                    }
+                    HandleActivationCode(alert, code);
+                }];
+            Orig_addAction(self, _cmd, ourAction);
+            return;
         }
     }
 
-    // 非目标弹窗，走原始实现
-    if (Orig_addAction) Orig_addAction(self, _cmd, action);
+    // 非目标，走原始
+    Orig_addAction(self, _cmd, action);
 }
 
 #pragma mark - UIAlertController swizzle
