@@ -1,16 +1,6 @@
 name: Build Dylibs
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - '*.m'
-      - '*.xm'
-      - '*.c'
-      - '*.mm'
-      - '*.swift'
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
