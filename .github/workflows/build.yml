@@ -10,6 +10,7 @@ on:
         default: 'LengyeDouyin'
         options:
           - 'LengyeDouyin'
+          - 'LengyeDouyinV2'
           - 'DouyinDump'
           - 'HaodeKamiBridge'
           - 'KamiBypass'
@@ -33,6 +34,17 @@ jobs:
           -framework Speech -framework Photos -fobjc-arc \
           -o LengyeDouyin.dylib lengye-tiktok-assistant.m
         lipo -info LengyeDouyin.dylib
+
+    - name: Build LengyeDouyinV2
+      if: github.event.inputs.target == 'LengyeDouyinV2'
+      run: |
+        clang -arch arm64 -arch arm64e \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -target arm64-apple-ios14.0 -shared -dynamiclib \
+          -framework Foundation -framework UIKit -framework AVFoundation \
+          -framework Speech -fobjc-arc \
+          -o LengyeDouyinV2.dylib lengye-tiktok-v2.m
+        lipo -info LengyeDouyinV2.dylib
 
     - name: Build DouyinDump
       if: github.event.inputs.target == 'DouyinDump'
