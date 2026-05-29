@@ -10,8 +10,8 @@ on:
         default: 'LengyeDouyin'
         options:
           - 'LengyeDouyin'
+          - 'DouyinDump'
           - 'HaodeKamiBridge'
-          - 'DouyinDramaSkip'
           - 'KamiBypass'
           - 'TIXBypass'
           - 'NetworkLogger'
@@ -28,81 +28,59 @@ jobs:
       run: |
         clang -arch arm64 -arch arm64e \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -target arm64-apple-ios14.0 \
-          -shared -dynamiclib \
+          -target arm64-apple-ios14.0 -shared -dynamiclib \
           -framework Foundation -framework UIKit -framework AVFoundation \
-          -framework Speech -framework Photos \
-          -fobjc-arc \
+          -framework Speech -framework Photos -fobjc-arc \
           -o LengyeDouyin.dylib lengye-tiktok-assistant.m
         lipo -info LengyeDouyin.dylib
-        echo "✅ 冷夜抖音助手 编译完成"
+
+    - name: Build DouyinDump
+      if: github.event.inputs.target == 'DouyinDump'
+      run: |
+        clang -arch arm64 -arch arm64e \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -target arm64-apple-ios14.0 -shared -dynamiclib \
+          -framework Foundation -framework UIKit -fobjc-arc \
+          -o DouyinDump.dylib douyin-class-dump.m
+        lipo -info DouyinDump.dylib
 
     - name: Build HaodeKamiBridge
       if: github.event.inputs.target == 'HaodeKamiBridge'
       run: |
         clang -arch arm64 -arch arm64e \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -target arm64-apple-ios14.0 \
-          -shared -dynamiclib \
-          -framework Foundation -framework UIKit -framework Security \
-          -fobjc-arc \
+          -target arm64-apple-ios14.0 -shared -dynamiclib \
+          -framework Foundation -framework UIKit -framework Security -fobjc-arc \
           -o HaodeKamiBridge.dylib haode-kami-bridge.m
         lipo -info HaodeKamiBridge.dylib
-        echo "✅ HaodeKamiBridge 编译完成"
-
-    - name: Build DouyinDramaSkip
-      if: github.event.inputs.target == 'DouyinDramaSkip'
-      run: |
-        clang -arch arm64 -arch arm64e \
-          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -target arm64-apple-ios14.0 \
-          -shared -dynamiclib \
-          -framework Foundation -framework UIKit -framework AVFoundation \
-          -fobjc-arc \
-          -o DouyinDramaSkip.dylib douyin-drama-skip.m
-        lipo -info DouyinDramaSkip.dylib
-        echo "✅ DouyinDramaSkip 编译完成"
 
     - name: Build KamiBypass
       if: github.event.inputs.target == 'KamiBypass'
       run: |
         clang -arch arm64 -arch arm64e \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -target arm64-apple-ios14.0 \
-          -shared -dynamiclib -framework Foundation \
-          -fobjc-arc -o KamiBypass.dylib kami-bypass.m
+          -target arm64-apple-ios14.0 -shared -dynamiclib \
+          -framework Foundation -fobjc-arc -o KamiBypass.dylib kami-bypass.m
         lipo -info KamiBypass.dylib
-        echo "✅ KamiBypass 编译完成"
 
     - name: Build TIXBypass
       if: github.event.inputs.target == 'TIXBypass'
       run: |
         clang -arch arm64 -arch arm64e \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -target arm64-apple-ios14.0 \
-          -shared -dynamiclib -framework Foundation \
-          -fobjc-arc -o TIXBypass.dylib bypass.m
+          -target arm64-apple-ios14.0 -shared -dynamiclib \
+          -framework Foundation -fobjc-arc -o TIXBypass.dylib bypass.m
         lipo -info TIXBypass.dylib
-        echo "✅ TIXBypass 编译完成"
 
     - name: Build NetworkLogger
       if: github.event.inputs.target == 'NetworkLogger'
       run: |
         clang -arch arm64 -arch arm64e \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -target arm64-apple-ios14.0 \
-          -shared -dynamiclib \
-          -framework Foundation -framework UIKit -framework CoreGraphics \
-          -fobjc-arc \
+          -target arm64-apple-ios14.0 -shared -dynamiclib \
+          -framework Foundation -framework UIKit -framework CoreGraphics -fobjc-arc \
           -o NetworkLogger.dylib network-logger.m
         lipo -info NetworkLogger.dylib
-        echo "✅ NetworkLogger 编译完成"
-
-    - name: Package artifact
-      run: |
-        TARGET="${{ github.event.inputs.target }}"
-        echo "Artifact: ${TARGET}.dylib"
-        ls -lh ${TARGET}.dylib
 
     - uses: actions/upload-artifact@v4
       with:
