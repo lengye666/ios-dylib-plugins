@@ -1,0 +1,38 @@
+name: Build LengyeDouyin V4
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Prepare Theos
+      uses: huami1314/theos-action@main
+
+    - name: Setup GNU Make
+      run: echo "$(brew --prefix)/opt/make/libexec/gnubin" >> $GITHUB_PATH
+
+    - name: Build
+      run: |
+        cd LengyeDouyinV4
+        make package FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+
+    - name: Extract dylib
+      run: |
+        mkdir -p output
+        DEB=$(ls LengyeDouyinV4/packages/*.deb | head -1)
+        echo "DEB: $DEB"
+        mkdir -p tmp && cd tmp
+        ar x "../$DEB"
+        tar xf data.tar.*
+        find . -name "*.dylib" -exec cp {} ../output/ \;
+        cd ..
+        ls -la output/
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: LengyeDouyinV4-dylib
+        path: output/*.dylib
