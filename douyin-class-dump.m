@@ -19,7 +19,7 @@ static void init_dump(void) {
     NSLog(@"[Dump] 抖音类名导出插件已加载");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5.0 * NSEC_PER_SEC),
-                  dispatch_get_default_queue(), ^{
+                  dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSLog(@"[Dump] 开始扫描所有类...");
 
         unsigned int count = 0;
@@ -71,7 +71,7 @@ static void init_dump(void) {
             free(methods);
 
             unsigned int pCount = 0;
-            Protocol **protocols = class_copyProtocolList(cls, &pCount);
+            Protocol * __unsafe_unretained *protocols = class_copyProtocolList(cls, &pCount);
             NSMutableArray *protoNames = [NSMutableArray array];
             for (unsigned int p = 0; p < pCount; p++) {
                 [protoNames addObject:NSStringFromProtocol(protocols[p])];
