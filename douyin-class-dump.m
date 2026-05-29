@@ -90,10 +90,40 @@ static void init_dump(void) {
         }
         free(classes);
 
-        // 写文件
-        NSString *path = @"/var/mobile/Documents/douyin_classes.txt";
-        [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        NSLog(@"[Dump] ✅ 导出完成: %@ (%lu bytes)", path, (unsigned long)[output length]);
-        NSLog(@"[Dump] 用 Filza 打开 /var/mobile/Documents/douyin_classes.txt");
+        // 直接上传到 log.lengye.top
+        NSString *boundary = @"BoundaryDouyinDump";
+        NSURL *url = [NSURL URLWithString:@"https://log.lengye.top/api/log/upload"];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+        req.HTTPMethod = @"POST";
+        req.timeoutInterval = 60;
+        [req setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary]
+            forHTTPHeaderField:@"Content-Type"];
+
+        NSMutableData *body = [NSMutableData data];
+        [body appendData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
+        [body appendData:[@"Content-Disposition: form-data; name=\"file\"; filename=\"douyin_classes.txt\"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
+        [body appendData:[@"Content-Type: text/plain; charset=utf-8\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
+        [body appendData:[output dataUsingEncoding:NSUTF8StringEncoding]];
+        [body appendData:[[NSString stringWithFormat:@"\r\n--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
+        req.HTTPBody = body;
+
+        NSLog(@"[Dump] 正在上传 %lu 字节到 log.lengye.top...", (unsigned long)body.length);
+
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            NSHTTPURLResponse *http = (NSHTTPURLResponse *)r;
+            if (e) {
+                NSLog(@"[Dump] ❌ 上传失败: %@", e.localizedDescription);
+                // 兜底写本地
+                NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+                NSString *path = [docs stringByAppendingPathComponent:@"douyin_classes.txt"];
+                [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                NSLog(@"[Dump] 已保存到本地: %@", path);
+            } else {
+                NSLog(@"[Dump] ✅ 上传成功 HTTP %ld", (long)http.statusCode);
+            }
+            dispatch_semaphore_signal(sem);
+        }] resume];
+        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
     });
 }
