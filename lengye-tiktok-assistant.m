@@ -34,6 +34,12 @@ static AVPlayer *findPlayerInView(UIView *);
 static void hookMessageDelete(void);
 static void uploadDumpAsync(NSString *);
 static UIViewController *findSettingsViewController(void);
+static void injectSettingsEntryAgain(void);
+static void addSettingsRow(UIViewController *);
+static UIViewController *searchForSettingsVC(UIViewController *);
+static UITableView *findTableViewInView(UIView *);
+static id findCollectionViewInView(UIView *);
+static void hookTableView(UITableView *);
 
 // ============================================================
 // MARK: - 全局配置
