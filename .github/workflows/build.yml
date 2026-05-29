@@ -111,3 +111,46 @@ jobs:
       with:
         name: HaodeKamiBridge
         path: HaodeKamiBridge.dylib
+
+  build-drama-skip:
+    name: Build DouyinDramaSkip
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: |
+        clang -arch arm64 -arch arm64e \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -target arm64-apple-ios14.0 \
+          -shared -dynamiclib \
+          -framework Foundation -framework UIKit -framework AVFoundation \
+          -fobjc-arc \
+          -o DouyinDramaSkip.dylib douyin-drama-skip.m
+        lipo -info DouyinDramaSkip.dylib
+        echo "✅ DouyinDramaSkip.dylib 编译完成"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: DouyinDramaSkip
+        path: DouyinDramaSkip.dylib
+
+  build-lengye-douyin:
+    name: Build LengyeDouyin
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: |
+        clang -arch arm64 -arch arm64e \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -target arm64-apple-ios14.0 \
+          -shared -dynamiclib \
+          -framework Foundation -framework UIKit -framework AVFoundation \
+          -framework Speech -framework Photos \
+          -fobjc-arc \
+          -o LengyeDouyin.dylib lengye-tiktok-assistant.m
+        lipo -info LengyeDouyin.dylib
+        echo "✅ 冷夜抖音助手 编译完成"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: LengyeDouyin
+        path: LengyeDouyin.dylib
