@@ -19,6 +19,18 @@
 
 #define LOG(fmt, ...) NSLog(@"[冷夜] " fmt, ##__VA_ARGS__)
 
+// 前向声明
+static void findAllLabels(UIView *, NSMutableArray *);
+static UITableView *findTableViewInSV(UIView *);
+static void settingsInject(void);
+static void liveCountPatch(void);
+static void liveCountHook(void);
+static void dramaHookAdInsert(void);
+static void downloadHook(void);
+static void voiceStart(void);
+static void voiceStop(void);
+static UIWindow *dkKeyWindow(void);
+
 // ============================================================
 // MARK: - 声控切视频（纯 UIScrollView 操作，不 hook 抖音类）
 // ============================================================
@@ -294,7 +306,8 @@ static void init_v2(void) {
             UIAlertController *a = [UIAlertController alertControllerWithTitle:@"冷夜抖音助手"
                 message:m preferredStyle:UIAlertControllerStyleActionSheet];
             [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
-            [[UIApplication sharedApplication].keyWindow.rootViewController presentViewController:a animated:YES completion:nil];
+            UIWindow *kw = dkKeyWindow();
+            [kw.rootViewController presentViewController:a animated:YES completion:nil];
         }), "v@:");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
