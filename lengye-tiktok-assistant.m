@@ -40,6 +40,7 @@ static UIViewController *searchForSettingsVC(UIViewController *);
 static UITableView *findTableViewInView(UIView *);
 static id findCollectionViewInView(UIView *);
 static void hookTableView(UITableView *);
+static void safeEnableFeature(NSString *);
 
 // ============================================================
 // MARK: - 全局配置
