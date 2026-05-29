@@ -90,40 +90,22 @@ static void init_dump(void) {
         }
         free(classes);
 
-        // 直接上传到 log.lengye.top
-        NSString *boundary = @"BoundaryDouyinDump";
-        NSURL *url = [NSURL URLWithString:@"https://log.lengye.top/api/log/upload"];
+        // 先写本地（保证文件一定生成）
+        NSString *path = @"/tmp/douyin_classes.txt";
+        [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSLog(@"[Dump] ✅ 文件已保存: %@ (%lu bytes)", path, (unsigned long)output.length);
+
+        // 上传 (POST / 纯文本)
+        NSURL *url = [NSURL URLWithString:@"https://log.lengye.top/"];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-        req.HTTPMethod = @"POST";
-        req.timeoutInterval = 60;
-        [req setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary]
-            forHTTPHeaderField:@"Content-Type"];
+        req.HTTPMethod = @"POST"; req.timeoutInterval = 30;
+        [req setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+        req.HTTPBody = [output dataUsingEncoding:NSUTF8StringEncoding];
 
-        NSMutableData *body = [NSMutableData data];
-        [body appendData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
-        [body appendData:[@"Content-Disposition: form-data; name=\"file\"; filename=\"douyin_classes.txt\"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
-        [body appendData:[@"Content-Type: text/plain; charset=utf-8\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
-        [body appendData:[output dataUsingEncoding:NSUTF8StringEncoding]];
-        [body appendData:[[NSString stringWithFormat:@"\r\n--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
-        req.HTTPBody = body;
-
-        NSLog(@"[Dump] 正在上传 %lu 字节到 log.lengye.top...", (unsigned long)body.length);
-
-        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        NSLog(@"[Dump] 上传中 (%lu bytes)...", (unsigned long)req.HTTPBody.length);
         [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-            NSHTTPURLResponse *http = (NSHTTPURLResponse *)r;
-            if (e) {
-                NSLog(@"[Dump] ❌ 上传失败: %@", e.localizedDescription);
-                // 兜底写本地
-                NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-                NSString *path = [docs stringByAppendingPathComponent:@"douyin_classes.txt"];
-                [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-                NSLog(@"[Dump] 已保存到本地: %@", path);
-            } else {
-                NSLog(@"[Dump] ✅ 上传成功 HTTP %ld", (long)http.statusCode);
-            }
-            dispatch_semaphore_signal(sem);
+            NSInteger code = [(NSHTTPURLResponse *)r statusCode];
+            NSLog(@"[Dump] 上传 HTTP %ld %@", (long)code, e ? e.localizedDescription : @"");
         }] resume];
-        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
     });
 }
