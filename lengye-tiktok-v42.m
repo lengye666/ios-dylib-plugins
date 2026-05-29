@@ -18,10 +18,6 @@ static void vcStart(void);
 static void vcStop(void);
 static void vcToggle(void);
 static UIWindow *kw(void);
-static UIScrollView*fs(UIView*r){for(UIView*s in r.subviews){if([s isKindOfClass:[UIScrollView class]]&&s.frame.size.height>300&&![s isKindOfClass:[UITableView class]]){UIScrollView*v=(UIScrollView*)s;if(v.contentSize.height>v.frame.size.height*2)return v;}UIScrollView*f=fs(s);if(f)return f;}return nil;}
-
-static void vcToggle(void);
-static UIWindow *kw(void);
 static UIScrollView *fs(UIView *r);
 
 static UIWindow *kw(void){for(UIScene*s in[UIApplication sharedApplication].connectedScenes)if([s isKindOfClass:[UIWindowScene class]])for(UIWindow*w in[(UIWindowScene*)s windows])if(w.isKeyWindow)return w;return[UIApplication sharedApplication].windows.firstObject;}
