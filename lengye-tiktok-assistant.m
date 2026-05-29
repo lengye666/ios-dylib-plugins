@@ -575,8 +575,19 @@ static BOOL gSettingsInjected = NO;
 
 - (void)switchChanged:(UISwitch *)sw {
     NSDictionary *item = self.items[sw.tag];
-    PREFS_SET(item[@"key"], sw.on);
+    NSString *key = item[@"key"];
+    PREFS_SET(key, sw.on);
     LOG(@"⚙️ %@ → %@", item[@"title"], sw.on ? @"开" : @"关");
+
+    // 立即激活/关闭功能（安全包装）
+    if (sw.on) {
+        if ([key isEqualToString:@"voice_enabled"])  safeEnableFeature(@"voice");
+        if ([key isEqualToString:@"drama_skip"])      safeEnableFeature(@"drama");
+        if ([key isEqualToString:@"anti_revoke"])     safeEnableFeature(@"revoke");
+        if ([key isEqualToString:@"remove_ads"])      safeEnableFeature(@"ads");
+    } else {
+        if ([key isEqualToString:@"voice_enabled"])   stopVoiceControl();
+    }
 }
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
@@ -713,49 +724,34 @@ static void hookTableView(UITableView *tv) {
 // ============================================================
 // MARK: - AVAudioSession 配置（避免语音和视频冲突）
 
-// MARK: - 入口 (安全启动，不崩)
+// MARK: - 入口 (极简安全启动)
 // ============================================================
 
 __attribute__((constructor))
 static void LengyeInit(void) {
-    LOG(@"===== 冷夜抖音助手 v1.0 =====");
-
+    NSLog(@"[冷夜] ===== 抖音助手 v1.1 加载 =====");
     loadPrefs();
 
-    // 所有初始化延迟执行，避免干扰抖音自身启动
+    // 启动时什么都不做！不扫类、不hook、不开语音。
+    // 只等设置页延迟注入。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3.0 * NSEC_PER_SEC),
                   dispatch_get_main_queue(), ^{
-        @try {
-            // 语音控制 — 只有开关打开才启动
-            if (PREFS_BOOL(@"voice_enabled", YES)) {
-                startVoiceControl();
-            }
-
-            installDramaAdSkip();
-            installAntiRevoke();
-            installWatermarkRemoval();
-            installAdRemoval();
-            injectSettingsEntry();
-
-            LOG(@"所有模块已初始化 ✅");
-        } @catch (NSException *e) {
-            LOG(@"初始化异常(已忽略): %s", e.description.UTF8String);
-        }
+        @try { injectSettingsEntry(); }
+        @catch (NSException *e) { NSLog(@"[冷夜] 设置注入失败(已忽略)"); }
     });
 
-    // 前台/后台控制语音
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-                                                       object:nil queue:[NSOperationQueue mainQueue]
-                                                   usingBlock:^(NSNotification *note) {
-        if (!PREFS_BOOL(@"voice_enabled", YES)) return;
-        if (gVoiceRunning) return;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC),
-                      dispatch_get_main_queue(), ^{ startVoiceControl(); });
-    }];
+    NSLog(@"[冷夜] 安全模式启动 — 功能需在设置中手动开启");
+}
 
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
-                                                       object:nil queue:[NSOperationQueue mainQueue]
-                                                   usingBlock:^(NSNotification *note) {
-        stopVoiceControl();
-    }];
+// 功能安全激活（供设置页 switch 调用）
+static void safeEnableFeature(NSString *feature) {
+    NSLog(@"[冷夜] 开启: %@", feature);
+    @try {
+        if ([feature isEqualToString:@"voice"]) startVoiceControl();
+        else if ([feature isEqualToString:@"drama"]) installDramaAdSkip();
+        else if ([feature isEqualToString:@"revoke"]) installAntiRevoke();
+        else if ([feature isEqualToString:@"ads"]) installAdRemoval();
+    } @catch (NSException *e) {
+        NSLog(@"[冷夜] 开启%@失败(已忽略)", feature);
+    }
 }
