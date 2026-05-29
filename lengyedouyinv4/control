@@ -1,0 +1,9 @@
+Package: com.lengye.douyin
+Name: 冷夜抖音助手
+Version: 4.0
+Description: 声控切视频 + 短剧跳广告
+Section: Tweaks
+Depends: firmware (>= 14.0)
+Architecture: iphoneos-arm
+Author: 冷夜
+Maintainer: 冷夜
