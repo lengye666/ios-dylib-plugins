@@ -712,19 +712,8 @@ static void hookTableView(UITableView *tv) {
 
 // ============================================================
 // MARK: - AVAudioSession 配置（避免语音和视频冲突）
-// ============================================================
 
-static void configureAudioSession(void) {
-    // 让语音识别和抖音视频播放共存
-    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayAndRecord
-                                    withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker |
-                                                 AVAudioSessionCategoryOptionAllowBluetooth |
-                                                 AVAudioSessionCategoryOptionMixWithOthers
-                                          error:nil];
-}
-
-// ============================================================
-// MARK: - 入口
+// MARK: - 入口 (安全启动，不崩)
 // ============================================================
 
 __attribute__((constructor))
@@ -733,30 +722,35 @@ static void LengyeInit(void) {
 
     loadPrefs();
 
-    // 音频配置
-    configureAudioSession();
+    // 所有初始化延迟执行，避免干扰抖音自身启动
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3.0 * NSEC_PER_SEC),
+                  dispatch_get_main_queue(), ^{
+        @try {
+            // 语音控制 — 只有开关打开才启动
+            if (PREFS_BOOL(@"voice_enabled", YES)) {
+                startVoiceControl();
+            }
 
-    // 各功能模块
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // 语音控制 — 延迟启动，等抖音初始化完
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2.0 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            startVoiceControl();
-        });
+            installDramaAdSkip();
+            installAntiRevoke();
+            installWatermarkRemoval();
+            installAdRemoval();
+            injectSettingsEntry();
 
-        installDramaAdSkip();
-        installAntiRevoke();
-        installWatermarkRemoval();
-        installAdRemoval();
-        injectSettingsEntry();
-
-        LOG(@"所有模块已初始化 ✅");
+            LOG(@"所有模块已初始化 ✅");
+        } @catch (NSException *e) {
+            LOG(@"初始化异常(已忽略): %s", e.description.UTF8String);
+        }
     });
 
-    // 监听 App 进入前台/后台 → 控制语音识别的启停
+    // 前台/后台控制语音
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                        object:nil queue:[NSOperationQueue mainQueue]
                                                    usingBlock:^(NSNotification *note) {
-        if (PREFS_BOOL(@"voice_enabled", YES)) startVoiceControl();
+        if (!PREFS_BOOL(@"voice_enabled", YES)) return;
+        if (gVoiceRunning) return;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.0 * NSEC_PER_SEC),
+                      dispatch_get_main_queue(), ^{ startVoiceControl(); });
     }];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
