@@ -1,6 +1,5 @@
 /**
- * 冷夜抖音助手 v4.2 — 默认关闭 + 抖音设置页开关
- * 编译: clang (不用 Theos)
+ * 冷夜抖音助手 v4.2.1 — 声控加保护
  */
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -12,14 +11,111 @@
 static BOOL lenBOOL(NSString*k){return[[NSUserDefaults standardUserDefaults]boolForKey:[@"len_" stringByAppendingString:k]];}
 
 // ============================================================
-// 声控 (默认关)
+// 声控 (默认关, 加保护)
 // ============================================================
 static AVAudioEngine *gAE=nil;static SFSpeechRecognizer *gSR=nil;static SFSpeechAudioBufferRecognitionRequest *gRQ=nil;static BOOL gVo=NO;
 static UIWindow *kw(void){for(UIScene*s in[UIApplication sharedApplication].connectedScenes)if([s isKindOfClass:[UIWindowScene class]])for(UIWindow*w in[(UIWindowScene*)s windows])if(w.isKeyWindow)return w;return[UIApplication sharedApplication].windows.firstObject;}
 static UIScrollView*fs(UIView*r){for(UIView*s in r.subviews){if([s isKindOfClass:[UIScrollView class]]&&s.frame.size.height>300&&![s isKindOfClass:[UITableView class]]){UIScrollView*v=(UIScrollView*)s;if(v.contentSize.height>v.frame.size.height*2)return v;}UIScrollView*f=fs(s);if(f)return f;}return nil;}
-static void vcStart(void){if(gVo)return;[SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus st){if(st!=SFSpeechRecognizerAuthorizationStatusAuthorized)return;dispatch_async(dispatch_get_main_queue(),^{gSR=[[SFSpeechRecognizer alloc]initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];if(!gSR||!gSR.isAvailable)return;gAE=[[AVAudioEngine alloc]init];gRQ=[[SFSpeechAudioBufferRecognitionRequest alloc]init];gRQ.shouldReportPartialResults=YES;[gAE.inputNode installTapOnBus:0 bufferSize:1024 format:[gAE.inputNode outputFormatForBus:0] block:^(AVAudioPCMBuffer*b,AVAudioTime*t){[gRQ appendAudioPCMBuffer:b];}];[gAE prepare];[gAE startAndReturnError:nil];[gSR recognitionTaskWithRequest:gRQ resultHandler:^(SFSpeechRecognitionResult*r,NSError*e){if(!r)return;NSString*t=r.bestTranscription.formattedString.lowercaseString;if([t containsString:@"下一个"])dispatch_async(dispatch_get_main_queue(),^{UIWindow*w=kw();UIScrollView*s=fs(w);if(s)[s setContentOffset:CGPointMake(0,s.contentOffset.y+s.frame.size.height)animated:YES];});else if([t containsString:@"上一个"])dispatch_async(dispatch_get_main_queue(),^{UIWindow*w=kw();UIScrollView*s=fs(w);if(s)[s setContentOffset:CGPointMake(0,MAX(0,s.contentOffset.y-s.frame.size.height))animated:YES];});else if([t containsString:@"点赞"])dispatch_async(dispatch_get_main_queue(),^{UIWindow*w=kw();UIView*v=[w hitTest:CGPointMake(w.frame.size.width/2,w.frame.size.height/2)withEvent:nil];if([v isKindOfClass:[UIControl class]]){[(UIControl*)v sendActionsForControlEvents:UIControlEventTouchUpInside];usleep(150000);[(UIControl*)v sendActionsForControlEvents:UIControlEventTouchUpInside];}});}];gVo=YES;LOG(@"🎤 语音已开启");});}];}
-static void vcStop(void){if(!gVo)return;[gAE stop];[gAE.inputNode removeTapOnBus:0];[gRQ endAudio];gRQ=nil;gSR=nil;gAE=nil;gVo=NO;LOG(@"🎤 语音已关闭");}
-static void vcToggle(void){if(lenBOOL(@"voice"))vcStart();else vcStop();}
+
+static void vcStart(void) {
+    if (gVo) return;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [SFSpeechRecognizer requestAuthorization:^(SFSpeechRecognizerAuthorizationStatus st) {
+            if (st != SFSpeechRecognizerAuthorizationStatusAuthorized) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @try {
+                    gSR = [[SFSpeechRecognizer alloc] initWithLocale:[NSLocale localeWithLocaleIdentifier:@"zh-CN"]];
+                    if (!gSR || !gSR.isAvailable) { LOG(@"🎤 不可用"); return; }
+
+                    // 保存原始音频会话配置
+                    AVAudioSession *sess = [AVAudioSession sharedInstance];
+                    NSString *oldCat = sess.category;
+                    NSUInteger oldOpt = sess.categoryOptions;
+
+                    // 用 MixWithOthers 跟抖音共存
+                    [sess setCategory:AVAudioSessionCategoryPlayAndRecord
+                        withOptions:AVAudioSessionCategoryOptionMixWithOthers | AVAudioSessionCategoryOptionAllowBluetooth
+                        error:nil];
+                    [sess setActive:YES withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
+
+                    gAE = [[AVAudioEngine alloc] init];
+                    gRQ = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
+                    gRQ.shouldReportPartialResults = YES;
+
+                    @try {
+                        [gAE.inputNode installTapOnBus:0 bufferSize:1024
+                            format:[gAE.inputNode outputFormatForBus:0]
+                            block:^(AVAudioPCMBuffer *b, AVAudioTime *t) {
+                                @try { [gRQ appendAudioPCMBuffer:b]; } @catch (NSException *e) {}
+                            }];
+                    } @catch (NSException *e) {
+                        LOG(@"🎤 安装音频Tap失败: %@", e);
+                        [sess setCategory:oldCat withOptions:oldOpt error:nil];
+                        vcStop(); return;
+                    }
+
+                    NSError *err = nil;
+                    [gAE startAndReturnError:&err];
+                    if (err) {
+                        LOG(@"🎤 引擎启动失败: %@ — 恢复原音频设置", err);
+                        [sess setCategory:oldCat withOptions:oldOpt error:nil];
+                        vcStop();
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+                                if ([s isKindOfClass:[UIWindowScene class]]) {
+                                    UIViewController *r = [(UIWindowScene *)s windows].firstObject.rootViewController;
+                                    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"语音暂时不可用"
+                                        message:@"抖音正在使用麦克风\n关闭抖音后重新打开再试" preferredStyle:UIAlertControllerStyleAlert];
+                                    [a addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
+                                    [r presentViewController:a animated:YES completion:nil];
+                                    break;
+                                }
+                            }
+                        });
+                        return;
+                    }
+
+                    [gSR recognitionTaskWithRequest:gRQ resultHandler:^(
+                        SFSpeechRecognitionResult *r, NSError *e) {
+                        if (!r || e) return;
+                        NSString *t = r.bestTranscription.formattedString.lowercaseString;
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            UIWindow *w = kw(); UIScrollView *sv = fs(w);
+                            if ([t containsString:@"下一个"]) { if (sv) [sv setContentOffset:CGPointMake(0, sv.contentOffset.y + sv.frame.size.height) animated:YES]; }
+                            else if ([t containsString:@"上一个"]) { if (sv) [sv setContentOffset:CGPointMake(0, MAX(0, sv.contentOffset.y - sv.frame.size.height)) animated:YES]; }
+                            else if ([t containsString:@"点赞"]) {
+                                UIView *v = [w hitTest:CGPointMake(w.frame.size.width/2, w.frame.size.height/2) withEvent:nil];
+                                if ([v isKindOfClass:[UIControl class]]) {
+                                    [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+                                    usleep(150000);
+                                    [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+                                }
+                            }
+                        });
+                    }];
+
+                    gVo = YES;
+                    LOG(@"🎤 语音已开启");
+                } @catch (NSException *e) { LOG(@"🎤 启动异常(已忽略): %@", e); vcStop(); }
+            });
+        }];
+    });
+}
+
+static void vcStop(void) {
+    @try {
+        if (!gVo) return;
+        [gAE stop];
+        [gAE.inputNode removeTapOnBus:0];
+        [gRQ endAudio];
+        // 还原音频会话，还给抖音
+        [[AVAudioSession sharedInstance] setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
+    } @catch (NSException *e) {}
+    gRQ = nil; gSR = nil; gAE = nil; gVo = NO;
+    LOG(@"🎤 语音已关闭");
+}
+
+static void vcToggle(void) { if (lenBOOL(@"voice")) vcStart(); else vcStop(); }
 
 // ============================================================
 // 设置页
@@ -37,12 +133,11 @@ static void vcToggle(void){if(lenBOOL(@"voice"))vcStart();else vcStop();}
 @end
 
 // ============================================================
-// 设置注入 — hook AWESettingsViewModel (运行时交换)
+// 设置注入 — hook AWESettingsViewModel
 // ============================================================
 static void injectSettings(void){
     Class svm=NSClassFromString(@"AWESettingsViewModel");if(!svm)return;
-    SEL sel=NSSelectorFromString(@"sectionDataArray");
-    Method m=class_getInstanceMethod(svm,sel);if(!m)return;
+    SEL sel=NSSelectorFromString(@"sectionDataArray");Method m=class_getInstanceMethod(svm,sel);if(!m)return;
     IMP o=method_getImplementation(m);
     method_setImplementation(m,imp_implementationWithBlock(^(id self){
         NSArray*orig=((NSArray*(*)(id,SEL))o)(self,sel);
@@ -68,7 +163,7 @@ static void injectSettings(void){
 }
 
 // ============================================================
-// 短剧跳广告 — hook 真实类名（运行时交换）
+// 短剧跳广告 — hook 真实类名
 // ============================================================
 static void dramaHook(void){
     NSArray*sels=@[@"insertAd:",@"playNextEpisode",@"showAd"];
@@ -83,7 +178,6 @@ static void dramaHook(void){
         }));
         LOG(@"📺 Hooked: %@",names[i]);
     }
-    // 兜底: AVPlayer结束自动切
     [[NSNotificationCenter defaultCenter]addObserverForName:AVPlayerItemDidPlayToEndTimeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification*n){if(!lenBOOL(@"drama"))return;AVPlayerItem*item=n.object;for(UIWindow*w in[UIApplication sharedApplication].windows)for(CALayer*l in w.layer.sublayers)if([l isKindOfClass:[AVPlayerLayer class]]){AVPlayer*p=[(AVPlayerLayer*)l player];if(p.currentItem==item&&[p isKindOfClass:[AVQueuePlayer class]]){[(AVQueuePlayer*)p advanceToNextItem];return;}}}];
 }
 
@@ -92,7 +186,7 @@ static void dramaHook(void){
 // ============================================================
 __attribute__((constructor))
 static void init42(void){
-    LOG(@"v4.2 加载 — 所有功能默认关闭");
+    LOG(@"v4.2.1 加载 — 所有功能默认关闭");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC),dispatch_get_main_queue(),^{
         injectSettings();
         dramaHook();
