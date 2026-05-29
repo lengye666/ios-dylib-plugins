@@ -25,6 +25,17 @@
 #define LOG(fmt, ...) NSLog(@"[冷夜] " fmt, ##__VA_ARGS__)
 
 // ============================================================
+// MARK: - 前向声明 (Forward declarations)
+// ============================================================
+static void dramaAdvanceToNext(id);
+static void hookRewardedAdCallbacks(void);
+static AVPlayer *findPlayerInKeyWindow(void);
+static AVPlayer *findPlayerInView(UIView *);
+static void hookMessageDelete(void);
+static void uploadDumpAsync(NSString *);
+static UIViewController *findSettingsViewController(void);
+
+// ============================================================
 // MARK: - 全局配置
 // ============================================================
 
@@ -204,8 +215,11 @@ static void dramaAdvanceToNext(id item) {
     if (!player) return;
 
     // 尝试跳下一集
-    if ([player respondsToSelector:@selector(advanceToNextItem)]) {
-        [player advanceToNextItem];
+    if ([player isKindOfClass:[AVQueuePlayer class]]) {
+        [(AVQueuePlayer *)player advanceToNextItem];
+        LOG(@"📺 AVQueuePlayer 切到下一集");
+    } else if ([player respondsToSelector:@selector(advanceToNextItem)]) {
+        [player performSelector:@selector(advanceToNextItem)];
     }
 }
 
