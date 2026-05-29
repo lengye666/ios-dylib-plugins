@@ -62,7 +62,7 @@ static void injectSettings(void){
         } forKey:@"cellTappedBlock"];
         id section=[[NSClassFromString(@"AWESettingSectionModel") alloc]init];
         [section setValue:@[item] forKey:@"itemArray"];[section setValue:@0 forKey:@"type"];[section setValue:@40 forKey:@"sectionHeaderHeight"];
-        NSMutableArray*na=[NSMutableArray arrayWithArray:orig];[na insertObject:section atIndex:0];return na;
+        NSMutableArray*na=[NSMutableArray arrayWithArray:orig];[na insertObject:section atIndex:0];return (NSArray*)na;
     }));
     LOG(@"⚙️ 设置注入完成");
 }
