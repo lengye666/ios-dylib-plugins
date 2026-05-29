@@ -1,111 +1,75 @@
 /**
- * douyin-class-dump.m
- * 抖音类名导出 — 极简版，只做一件事
- *
- * 注入后打开抖音 → 自动导出所有类名到文件
- * 文件路径: /var/mobile/Documents/douyin_classes.txt
- * 然后用 Filza 取出来发给我
- *
- * 编译: clang -arch arm64 -arch arm64e -shared -dynamiclib
- *       -framework Foundation -fobjc-arc -o DouyinDump.dylib
+ * douyin-class-dump.m v2 — 极简版，只导关键类名
  */
-
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <UIKit/UIKit.h>
 
 __attribute__((constructor))
 static void init_dump(void) {
-    NSLog(@"[Dump] 抖音类名导出插件已加载");
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5.0 * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSLog(@"[Dump] 开始扫描所有类...");
+        NSLog(@"[Dump] 扫描抖音类名...");
 
         unsigned int count = 0;
         Class *classes = objc_copyClassList(&count);
 
-        NSMutableString *output = [NSMutableString string];
-        [output appendFormat:@"=== 抖音类名列表 (%u 个非系统类) ===\n", count];
-        [output appendFormat:@"时间: %@\n\n", [NSDate date]];
+        // 只导出匹配关键词的类名（不导出方法，大幅减小体积）
+        NSArray *kw = @[@"drama",@"short",@"episode",@"series",@"playlist",
+                        @"reward",@"fullscreen",@"splash",@"feed",
+                        @"message",@"chat",@"im",@"convers",
+                        @"player",@"video",@"avplayer",@"stream",
+                        @"download",@"watermark",@"share",
+                        @"setting",@"prefer",@"account",@"profile",
+                        @"comment",@"like",@"follow",
+                        @"live",@"gift",@"room",
+                        @"search",@"discover",@"hot",
+                        @"webview",@"h5",@"jsbridge",
+                        @"push",@"notify",@"alert"];
 
-        // 关键字过滤
-        NSArray *keywords = @[@"drama",@"short",@"episode",@"ad",@"reward",
-                              @"message",@"chat",@"im",@"conv",
-                              @"player",@"video",@"play",@"download",
-                              @"setting",@"prefer",@"account",
-                              @"watermark",@"comment",@"follow",@"like",
-                              @"live",@"stream",@"feed",@"home",
-                              @"webview",@"jsbridge",@"h5"];
+        NSMutableString *out = [NSMutableString string];
+        [out appendFormat:@"=== 抖音关键类名 (%u total ===\n", count];
 
+        int matched = 0;
         for (unsigned int i = 0; i < count; i++) {
-            Class cls = classes[i];
-            NSString *name = NSStringFromClass(cls);
+            NSString *name = NSStringFromClass(classes[i]);
             NSString *lower = [name lowercaseString];
 
-            // 只看抖音命名空间的类
-            if (![lower hasPrefix:@"tt"] &&
-                ![lower hasPrefix:@"aw"] &&
-                ![lower hasPrefix:@"ss"] &&
-                ![lower hasPrefix:@"ies"] &&
-                ![lower hasPrefix:@"bu"] &&
-                ![lower hasPrefix:@"csj"] &&
-                ![lower hasPrefix:@"douyin"] &&
-                ![lower hasPrefix:@"tiktok"]) {
-                // 但也要包含广告 SDK 的类
-                BOOL isAdSDK = [lower containsString:@"pangle"] ||
-                               [lower containsString:@"buad"] ||
-                               [lower containsString:@"reward"];
-                if (!isAdSDK) continue;
+            // 只看抖音命名空间
+            if (![lower hasPrefix:@"tt"] && ![lower hasPrefix:@"aw"] &&
+                ![lower hasPrefix:@"ss"] && ![lower hasPrefix:@"ies"] &&
+                ![lower hasPrefix:@"bu"] && ![lower hasPrefix:@"csj"]) continue;
+
+            // 匹配关键词
+            BOOL hit = NO;
+            for (NSString *k in kw) {
+                if ([lower containsString:k]) { hit = YES; break; }
             }
+            if (!hit) continue;
 
             Class superCls = class_getSuperclass(cls);
-
-            // 列出方法和协议
-            unsigned int mCount = 0;
-            Method *methods = class_copyMethodList(cls, &mCount);
-            NSMutableArray *methodNames = [NSMutableArray array];
-            for (unsigned int m = 0; m < mCount && m < 20; m++) {
-                [methodNames addObject:NSStringFromSelector(method_getName(methods[m]))];
-            }
-            free(methods);
-
-            unsigned int pCount = 0;
-            Protocol * __unsafe_unretained *protocols = class_copyProtocolList(cls, &pCount);
-            NSMutableArray *protoNames = [NSMutableArray array];
-            for (unsigned int p = 0; p < pCount; p++) {
-                [protoNames addObject:NSStringFromProtocol(protocols[p])];
-            }
-            free(protocols);
-
-            [output appendFormat:@"● %@", name];
-            if (superCls) [output appendFormat:@" : %@", NSStringFromClass(superCls)];
-            if (protoNames.count > 0) [output appendFormat:@" <%@>", [protoNames componentsJoinedByString:@", "]];
-            [output appendString:@"\n"];
-            for (NSString *m in methodNames) {
-                [output appendFormat:@"    -%@\n", m];
-            }
-            if (mCount > 20) [output appendFormat:@"    ... +%u more\n", mCount - 20];
-            [output appendString:@"\n"];
+            [out appendFormat:@"%@", name];
+            if (superCls) [out appendFormat:@" : %@", NSStringFromClass(superCls)];
+            [out appendString:@"\n"];
+            matched++;
         }
         free(classes);
 
-        // 先写本地（保证文件一定生成）
-        NSString *path = @"/tmp/douyin_classes.txt";
-        [output writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        NSLog(@"[Dump] ✅ 文件已保存: %@ (%lu bytes)", path, (unsigned long)output.length);
+        [out appendFormat:@"\n匹配: %d 个类", matched];
 
-        // 上传 (POST / 纯文本)
-        NSURL *url = [NSURL URLWithString:@"https://log.lengye.top/"];
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-        req.HTTPMethod = @"POST"; req.timeoutInterval = 30;
+        // 上传
+        NSData *body = [out dataUsingEncoding:NSUTF8StringEncoding];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
+            [NSURL URLWithString:@"https://log.lengye.top/"]];
+        req.HTTPMethod = @"POST";
+        req.timeoutInterval = 60;
         [req setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
-        req.HTTPBody = [output dataUsingEncoding:NSUTF8StringEncoding];
+        req.HTTPBody = body;
 
-        NSLog(@"[Dump] 上传中 (%lu bytes)...", (unsigned long)req.HTTPBody.length);
-        [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-            NSInteger code = [(NSHTTPURLResponse *)r statusCode];
-            NSLog(@"[Dump] 上传 HTTP %ld %@", (long)code, e ? e.localizedDescription : @"");
+        NSLog(@"[Dump] 上传 %lu 字节 (%d 个类)...", (unsigned long)body.length, matched);
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            NSLog(@"[Dump] HTTP %ld %@", (long)[(NSHTTPURLResponse *)r statusCode],
+                  e ? e.localizedDescription : @"✅");
         }] resume];
     });
 }
