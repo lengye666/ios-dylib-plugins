@@ -12,6 +12,7 @@ on:
           - 'LengyeDouyin'
           - 'LengyeDouyinV2'
           - 'LengyeDouyinV3'
+          - 'LengyeDouyinV42'
           - 'DouyinDump'
           - 'HaodeKamiBridge'
           - 'KamiBypass'
@@ -57,6 +58,17 @@ jobs:
           -framework Speech -fobjc-arc \
           -o LengyeDouyinV3.dylib lengye-tiktok-v3.m
         lipo -info LengyeDouyinV3.dylib
+
+    - name: Build LengyeDouyinV42
+      if: github.event.inputs.target == 'LengyeDouyinV42'
+      run: |
+        clang -arch arm64 -arch arm64e \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -target arm64-apple-ios14.0 -shared -dynamiclib \
+          -framework Foundation -framework UIKit -framework AVFoundation \
+          -framework Speech -fobjc-arc \
+          -o LengyeDouyinV42.dylib lengye-tiktok-v42.m
+        lipo -info LengyeDouyinV42.dylib
 
     - name: Build DouyinDump
       if: github.event.inputs.target == 'DouyinDump'
