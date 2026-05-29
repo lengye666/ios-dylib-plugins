@@ -56,6 +56,48 @@ static void loadPrefs(void) {
 // MARK: - 语音控制 (声控切视频)
 // ============================================================
 
+// 手势辅助函数 — 必须在调用前定义
+static UIWindow *keyWindow(void) {
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *w in [(UIWindowScene *)s windows])
+                if (w.isKeyWindow) return w;
+        }
+    }
+    return [UIApplication sharedApplication].windows.firstObject;
+}
+
+static UIScrollView *findMainScrollView(UIView *root) {
+    for (UIView *sub in root.subviews) {
+        if ([sub isKindOfClass:[UIScrollView class]] && sub.frame.size.height > 300 && sub.frame.size.width > 200) {
+            UIScrollView *sv = (UIScrollView *)sub;
+            if (sv.contentSize.height > sv.frame.size.height * 2) return sv;
+        }
+        UIScrollView *f = findMainScrollView(sub); if (f) return f;
+    }
+    return nil;
+}
+
+static void simTap(UIView *view, CGPoint pt) {
+    UIView *t = [view hitTest:pt withEvent:nil];
+    if ([t isKindOfClass:[UIControl class]]) [(UIControl *)t sendActionsForControlEvents:UIControlEventTouchUpInside];
+    else for (int i=0;i<3&&t.superview;i++){t=t.superview;if([t isKindOfClass:[UIControl class]]){[(UIControl*)t sendActionsForControlEvents:UIControlEventTouchUpInside];return;}}
+}
+
+static void swipeDown(void) {
+    UIWindow *w = keyWindow(); if(!w)return;
+    UIScrollView *sv=findMainScrollView(w);
+    if(sv)[sv setContentOffset:CGPointMake(0,sv.contentOffset.y+sv.frame.size.height) animated:YES];
+}
+static void swipeUp(void) {
+    UIWindow *w = keyWindow(); if(!w)return;
+    UIScrollView *sv=findMainScrollView(w);
+    if(sv)[sv setContentOffset:CGPointMake(0,MAX(0,sv.contentOffset.y-sv.frame.size.height)) animated:YES];
+}
+static void tapCenter(void) { UIWindow *w=keyWindow();if(!w)return;simTap(w,CGPointMake(w.frame.size.width/2,w.frame.size.height/2)); }
+static void doubleTapCenter(void){tapCenter();usleep(150000);tapCenter();}
+static void togglePause(void){tapCenter();}
+
 static SFSpeechRecognizer *gRecognizer = nil;
 static SFSpeechAudioBufferRecognitionRequest *gSpeechRequest = nil;
 static AVAudioEngine *gAudioEngine = nil;
@@ -105,13 +147,13 @@ static void startVoiceControl(void) {
                     dispatch_async(dispatch_get_main_queue(), ^{ swipeUp(); });
                 } else if ([lower containsString:@"点赞"] || [lower containsString:@"喜欢"]) {
                     LOG(@"🎤 识别到「点赞」");
-                    dispatch_async(dispatch_get_main_queue(), ^{ tapVideoCenter(); });
+                    dispatch_async(dispatch_get_main_queue(), ^{ doubleTapCenter(); });
                 } else if ([lower containsString:@"暂停"] || [lower containsString:@"停止"]) {
                     LOG(@"🎤 识别到「暂停」");
-                    dispatch_async(dispatch_get_main_queue(), ^{ pauseVideo(); });
+                    dispatch_async(dispatch_get_main_queue(), ^{ togglePause(); });
                 } else if ([lower containsString:@"播放"] || [lower containsString:@"继续"]) {
                     LOG(@"🎤 识别到「播放」");
-                    dispatch_async(dispatch_get_main_queue(), ^{ playVideo(); });
+                    dispatch_async(dispatch_get_main_queue(), ^{ togglePause(); });
                 }
             }];
 
@@ -130,96 +172,6 @@ static void stopVoiceControl(void) {
     gAudioEngine = nil;
     gVoiceRunning = NO;
     LOG(@"🎤 语音控制已停止");
-}
-
-// 手势模拟
-static void swipeDown(void) {
-    UIWindow *win = keyWindow(); if (!win) return;
-    CGPoint from = CGPointMake(win.frame.size.width / 2, win.frame.size.height * 0.75);
-    CGPoint to   = CGPointMake(win.frame.size.width / 2, win.frame.size.height * 0.25);
-    CGEventRef down = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitLine, 1, 0);
-    CGEventPost(kCGHIDEventTap, down);
-    CFRelease(down);
-    // fallback: UISwipeGestureRecognizer 的方式不好模拟，所以用滚动事件
-    simulateSwipe(win, from, to);
-}
-
-static void swipeUp(void) {
-    UIWindow *win = keyWindow(); if (!win) return;
-    CGPoint from = CGPointMake(win.frame.size.width / 2, win.frame.size.height * 0.25);
-    CGPoint to   = CGPointMake(win.frame.size.width / 2, win.frame.size.height * 0.75);
-    simulateSwipe(win, from, to);
-}
-
-static void tapVideoCenter(void) {
-    UIWindow *win = keyWindow(); if (!win) return;
-    CGPoint center = CGPointMake(win.frame.size.width / 2, win.frame.size.height / 2);
-    // 模拟双击点赞
-    simulateTap(win, center);
-    usleep(100000);
-    simulateTap(win, center);
-}
-
-static void pauseVideo(void) {
-    UIWindow *win = keyWindow(); if (!win) return;
-    simulateTap(win, CGPointMake(win.frame.size.width / 2, win.frame.size.height / 2));
-}
-
-static void playVideo(void) {
-    pauseVideo(); // tap to toggle play/pause = same
-}
-
-static UIWindow *keyWindow(void) {
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            for (UIWindow *w in [(UIWindowScene *)scene windows]) {
-                if (w.isKeyWindow) return w;
-            }
-        }
-    }
-    return [UIApplication sharedApplication].windows.firstObject;
-}
-
-static void simulateTap(UIView *view, CGPoint point) {
-    // 通过 IOKit HID 发送触摸事件（更可靠）
-    // 简单方案：找到目标 view 的 UIControl 直接 sendActions
-    UIView *target = [view hitTest:point withEvent:nil];
-    if ([target isKindOfClass:[UIControl class]]) {
-        [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
-    } else if (target.gestureRecognizers.count > 0) {
-        // 触发 tap gesture
-        for (UIGestureRecognizer *gr in target.gestureRecognizers) {
-            if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
-                // 模拟 gesture 太复杂，用 IOHIDEvent
-                break;
-            }
-        }
-    }
-}
-
-static void simulateSwipe(UIView *view, CGPoint from, CGPoint to) {
-    // 通过 UIPanGestureRecognizer 的思路模拟滑动
-    // 简单方案：找 scrollView 然后 setContentOffset
-    UIScrollView *scrollView = findMainScrollView(view);
-    if (scrollView) {
-        CGPoint offset = scrollView.contentOffset;
-        offset.y += (from.y > to.y) ? scrollView.frame.size.height : -scrollView.frame.size.height;
-        [scrollView setContentOffset:offset animated:YES];
-        LOG(@"翻页: %.0f → %.0f", scrollView.contentOffset.y, offset.y);
-    }
-}
-
-static UIScrollView *findMainScrollView(UIView *root) {
-    for (UIView *sub in root.subviews) {
-        if ([sub isKindOfClass:[UIScrollView class]] &&
-            sub.frame.size.height > 300 && sub.frame.size.width > 200) {
-            UIScrollView *sv = (UIScrollView *)sub;
-            if (sv.contentSize.height > sv.frame.size.height * 2) return sv;
-        }
-        UIScrollView *found = findMainScrollView(sub);
-        if (found) return found;
-    }
-    return nil;
 }
 
 // ============================================================
