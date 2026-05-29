@@ -31,7 +31,8 @@ static void init_dump(void) {
 
         int matched = 0;
         for (unsigned int i = 0; i < count; i++) {
-            NSString *name = NSStringFromClass(classes[i]);
+            Class cls = classes[i];
+            NSString *name = NSStringFromClass(cls);
             NSString *lower = [name lowercaseString];
 
             // 只看抖音命名空间
