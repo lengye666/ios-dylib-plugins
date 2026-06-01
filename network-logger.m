@@ -5,9 +5,7 @@
 #import <mach-o/dyld.h>
 
 // ==========================================
-// NetworkLogger v4 - Full coverage
-// - UI process: NSURLProtocol + swizzle + floating UI
-// - Subprocess: auto-injected via Process hook, logs to file
+// NetworkLogger v4 - 全量拦截 + 搜索 / 汉化 / 上传
 // ==========================================
 
 #pragma mark - Block Target Wrapper
@@ -59,7 +57,6 @@ static UIWindow *gFloatWin;
 static CGFloat gScrW, gScrH;
 static BOOL gIsSubprocess = NO;
 
-// Subprocess log file path
 static NSString *gSubLogPath(void) {
     return @"/var/mobile/Documents/NW_subprocess.log";
 }
@@ -67,6 +64,7 @@ static NSString *gSubLogPath(void) {
 static void NWShowDetailList(void);
 static void NWShowSubLog(void);
 static void NWCopyAllLogs(void);
+static void NWUploadLogs(void);
 static void NWShowDetail(NWRequest *req);
 static NSString *NWTimeStr(NSDate *date);
 
@@ -81,7 +79,6 @@ static BOOL NWHasUIKit(void) {
     return NO;
 }
 
-// Find our dylib's file path on disk
 static NSString *NWFindDylibPath(void) {
     int count = _dyld_image_count();
     for (int i = 0; i < count; i++) {
@@ -101,8 +98,7 @@ static void NWWriteSubLog(NSString *line) {
     dispatch_once(&once, ^{
         gSubLogFile = fopen(gSubLogPath().UTF8String, "w");
         if (gSubLogFile) {
-            // Write header
-            fprintf(gSubLogFile, "NetworkLogger - Subprocess Log\n\n");
+            fprintf(gSubLogFile, "NetworkLogger - 子进程日志\n\n");
             fflush(gSubLogFile);
         }
     });
@@ -149,14 +145,12 @@ static void NWWriteSubLog(NSString *line) {
     NSString *ts = NWTimeStr([NSDate date]);
 
     if (gIsSubprocess) {
-        // Subprocess: write to file
         NSString *line = [NSString stringWithFormat:@"[%@] %@ %@ → %ld\n",
             ts, self.request.HTTPMethod ?: @"GET",
             self.request.URL.absoluteString,
             (long)((NSHTTPURLResponse *)resp).statusCode];
         NWWriteSubLog(line);
     } else {
-        // Main process: add to array
         NWRequest *e = [NWRequest new];
         e.url = self.request.URL.absoluteString;
         e.method = self.request.HTTPMethod ?: @"GET";
@@ -168,7 +162,7 @@ static void NWWriteSubLog(NSString *line) {
             NSData *body = self.request.HTTPBody.length > 2048
                 ? [self.request.HTTPBody subdataWithRange:NSMakeRange(0, 2048)] : self.request.HTTPBody;
             e.requestBody = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-            if (!e.requestBody) e.requestBody = @"[binary]";
+            if (!e.requestBody) e.requestBody = @"[二进制]";
         }
         [gRequests addObject:e];
     }
@@ -180,29 +174,18 @@ static void NWWriteSubLog(NSString *line) {
 - (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)dt didReceiveData:(NSData *)data {
     [self.respData appendData:data];
     [self.client URLProtocol:self didLoadData:data];
-
-    // Also log response headers once we have some data
-    if (!gIsSubprocess && gRequests.count > 0) {
-        NWRequest *last = gRequests.lastObject;
-        if (!last.responseBody) {
-            NSData *d = self.respData.length > 10240
-                ? [self.respData subdataWithRange:NSMakeRange(0, 10240)] : self.respData;
-            // Will be finalized in didCompleteWithError
-        }
-    }
 }
 
-- (void)URLSession:(NSURLSession *)s task:(NSURLSessionDataTask *)t didCompleteWithError:(NSError *)err {
+- (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didCompleteWithError:(NSError *)err {
     NSString *ts = NWTimeStr([NSDate date]);
 
     if (gIsSubprocess) {
-        // Subprocess: log completion
         NSString *line;
         if (err) {
-            line = [NSString stringWithFormat:@"[%@] ERROR: %@\n\n", ts, err.localizedDescription];
+            line = [NSString stringWithFormat:@"[%@] 错误: %@\n\n", ts, err.localizedDescription];
         } else {
             long bytes = (long)self.respData.length;
-            line = [NSString stringWithFormat:@"[%@] Done (%ld bytes)\n\n", ts, bytes];
+            line = [NSString stringWithFormat:@"[%@] 完成 (%ld 字节)\n\n", ts, bytes];
         }
         NWWriteSubLog(line);
     } else if (gRequests.count > 0) {
@@ -212,15 +195,15 @@ static void NWWriteSubLog(NSString *line) {
             NSData *d = self.respData.length > 10240
                 ? [self.respData subdataWithRange:NSMakeRange(0, 10240)] : self.respData;
             last.responseBody = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-            if (!last.responseBody) last.responseBody = @"[binary]";
+            if (!last.responseBody) last.responseBody = @"[二进制]";
         }
-        if (err) last.responseBody = [NSString stringWithFormat:@"[ERROR] %@", err.localizedDescription];
+        if (err) last.responseBody = [NSString stringWithFormat:@"[错误] %@", err.localizedDescription];
     }
     [self.client URLProtocolDidFinishLoading:self];
 }
 @end
 
-#pragma mark - Session Swizzle (metaclass)
+#pragma mark - Session Swizzle
 
 static void NWSwizzleSession(void) {
     Class metaCls = object_getClass([NSURLSession class]);
@@ -260,12 +243,9 @@ static void NWSwizzleSession(void) {
     }
 }
 
-#pragma mark - Task-Level Swizzle (VPN-safe fallback)
+#pragma mark - Task-Level Swizzle
 
-// Swizzle dataTaskWithRequest:completion: on NSURLSession to capture requests
-// at the task creation level. This works even when NSURLProtocol fails (VPN/etc).
 static void NWSwizzleTasks(void) {
-    // Instance method: dataTaskWithRequest:completionHandler:
     SEL sel1 = @selector(dataTaskWithRequest:completionHandler:);
     Method mt1 = class_getInstanceMethod([NSURLSession class], sel1);
     if (mt1) {
@@ -292,13 +272,13 @@ static void NWSwizzleTasks(void) {
                     e.duration = dur;
                     if (req.HTTPBody && req.HTTPBody.length > 0) {
                         NSData *body = req.HTTPBody.length > 2048 ? [req.HTTPBody subdataWithRange:NSMakeRange(0, 2048)] : req.HTTPBody;
-                        e.requestBody = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"[binary]";
+                        e.requestBody = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"[二进制]";
                     }
                     if (data && data.length > 0) {
                         NSData *d = data.length > 10240 ? [data subdataWithRange:NSMakeRange(0, 10240)] : data;
-                        e.responseBody = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"[binary]";
+                        e.responseBody = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"[二进制]";
                     }
-                    if (err) e.responseBody = [NSString stringWithFormat:@"[ERROR] %@", err.localizedDescription];
+                    if (err) e.responseBody = [NSString stringWithFormat:@"[错误] %@", err.localizedDescription];
                     [gRequests addObject:e];
                 }
 
@@ -310,7 +290,6 @@ static void NWSwizzleTasks(void) {
         method_setImplementation(mt1, newIMP);
     }
 
-    // Instance method: dataTaskWithURL:completionHandler:
     SEL sel2 = @selector(dataTaskWithURL:completionHandler:);
     Method mt2 = class_getInstanceMethod([NSURLSession class], sel2);
     if (mt2) {
@@ -323,17 +302,16 @@ static void NWSwizzleTasks(void) {
     }
 }
 
-#pragma mark - Hook Process to inject DYLD_INSERT_LIBRARIES
+#pragma mark - Hook Process
 
 static void NWHookProcess(void) {
-    // Process (Swift) is bridged to NSTask (ObjC)
     Class processClass = NSClassFromString(@"NSTask");
     if (!processClass) processClass = NSClassFromString(@"Process");
     if (!processClass) return;
 
     NSString *dylibPath = NWFindDylibPath();
     if (!dylibPath) {
-        NSLog(@"[NW] Cannot find dylib path for Process hook");
+        NSLog(@"[NW] 找不到 dylib 路径，跳过 Process hook");
         return;
     }
 
@@ -343,7 +321,6 @@ static void NWHookProcess(void) {
 
     IMP origIMP = method_getImplementation(m);
     IMP newIMP = imp_implementationWithBlock(^void(id self) {
-        // Inject our dylib into subprocess environment
         NSMutableDictionary *env = [[self valueForKey:@"environment"] mutableCopy];
         if (!env) env = [NSMutableDictionary new];
 
@@ -355,12 +332,12 @@ static void NWHookProcess(void) {
         }
         [self setValue:env forKey:@"environment"];
 
-        NSLog(@"[NW] Process launch → injected DYLD_INSERT_LIBRARIES: %@", dylibPath);
+        NSLog(@"[NW] 子进程启动 → 注入 DYLD_INSERT_LIBRARIES: %@", dylibPath);
 
         ((void (*)(id, SEL))origIMP)(self, launchSel);
     });
     method_setImplementation(m, newIMP);
-    NSLog(@"[NW] Hooked Process/NSTask launch");
+    NSLog(@"[NW] 已 Hook Process/NSTask launch");
 }
 
 #pragma mark - Date
@@ -392,17 +369,31 @@ static NSString *NWTimeStr(NSDate *date) {
 }
 @end
 
-#pragma mark - Table Helper
+#pragma mark - Table Helper (带搜索功能)
 
-@interface NWTblHelper : NSObject <UITableViewDataSource, UITableViewDelegate>
+@interface NWTblHelper : NSObject <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIView *container;
+@property (nonatomic, strong) UISearchBar *searchBar;
+@property (nonatomic, strong) NSMutableArray<NWRequest *> *filteredData;
+@property (nonatomic, assign) BOOL isFiltering;
 @end
 
 @implementation NWTblHelper
 
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return gRequests.count; }
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _filteredData = [NSMutableArray new];
+        _isFiltering = NO;
+    }
+    return self;
+}
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return self.isFiltering ? self.filteredData.count : gRequests.count;
+}
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     static NSString *cid = @"c";
@@ -416,8 +407,8 @@ static NSString *NWTimeStr(NSDate *date) {
         c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     }
-    NWRequest *r = gRequests[ip.row];
-    NSString *icon = (r.statusCode >= 200 && r.statusCode < 400) ? @"\u2705" : (r.statusCode >= 400 ? @"\u274C" : @"\U0001F4E1");
+    NWRequest *r = self.isFiltering ? self.filteredData[ip.row] : gRequests[ip.row];
+    NSString *icon = (r.statusCode >= 200 && r.statusCode < 400) ? @"✅" : (r.statusCode >= 400 ? @"❌" : @"📡");
     c.textLabel.text = [NSString stringWithFormat:@"%@ %@ %@", icon, r.method, r.url];
     NSMutableString *sub = [NSMutableString stringWithFormat:@"%ld | %.0fms", (long)r.statusCode, r.duration];
     if (r.responseBody.length > 0) {
@@ -431,8 +422,41 @@ static NSString *NWTimeStr(NSDate *date) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    NWShowDetail(gRequests[ip.row]);
+    NWRequest *r = self.isFiltering ? self.filteredData[ip.row] : gRequests[ip.row];
+    NWShowDetail(r);
 }
+
+#pragma mark - UISearchBarDelegate
+
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+    if (searchText.length == 0) {
+        self.isFiltering = NO;
+        [self.filteredData removeAllObjects];
+    } else {
+        self.isFiltering = YES;
+        NSString *lowerSearch = searchText.lowercaseString;
+        [self.filteredData removeAllObjects];
+        for (NWRequest *r in gRequests) {
+            NSString *urlLower = r.url.lowercaseString;
+            NSString *methodLower = r.method.lowercaseString;
+            NSString *bodyLower = r.responseBody.lowercaseString;
+            if ([urlLower containsString:lowerSearch] ||
+                [methodLower containsString:lowerSearch] ||
+                [bodyLower containsString:lowerSearch]) {
+                [self.filteredData addObject:r];
+            }
+        }
+    }
+    [self.tableView reloadData];
+    self.titleLabel.text = [NSString stringWithFormat:@"网络日志 (%lu%@)",
+                            (unsigned long)(self.isFiltering ? self.filteredData.count : gRequests.count),
+                            self.isFiltering ? [NSString stringWithFormat:@"/%lu", (unsigned long)gRequests.count] : @""];
+}
+
+- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
+    [searchBar resignFirstResponder];
+}
+
 @end
 
 #pragma mark - Floating Badge
@@ -464,7 +488,7 @@ static void NWCreateBadge(void) {
     gBadge.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.9];
     gBadge.layer.cornerRadius = sz / 2;
     gBadge.titleLabel.font = [UIFont boldSystemFontOfSize:11];
-    [gBadge setTitle:@"\U0001F4E1 0" forState:UIControlStateNormal];
+    [gBadge setTitle:@"📡 0" forState:UIControlStateNormal];
     [gBadge setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 
     NWDragHandler *dh = [NWDragHandler new];
@@ -477,16 +501,15 @@ static void NWCreateBadge(void) {
     [gFloatWin addSubview:gBadge];
 
     [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
-        NSString *title = [NSString stringWithFormat:@"\U0001F4E1 %lu", (unsigned long)gRequests.count];
-        // Check if subprocess log exists
+        NSString *title = [NSString stringWithFormat:@"📡 %lu", (unsigned long)gRequests.count];
         if ([[NSFileManager defaultManager] fileExistsAtPath:gSubLogPath()]) {
-            title = [title stringByAppendingString:@" \u2B50"]; // star indicator
+            title = [title stringByAppendingString:@" ⭐"];
         }
         [gBadge setTitle:title forState:UIControlStateNormal];
     }];
 }
 
-#pragma mark - Detail List
+#pragma mark - Detail List (带搜索 + 上传)
 
 static void NWShowDetailList(void) {
     UIWindowScene *scene = nil;
@@ -500,7 +523,7 @@ static void NWShowDetailList(void) {
     win.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
     win.hidden = NO;
 
-    NWTblHelper *helper = [NWTblHelper new];
+    NWTblHelper *helper = [[NWTblHelper alloc] init];
     NWRetainObj(helper);
 
     UIControl *bg = [[UIControl alloc] initWithFrame:win.bounds];
@@ -517,7 +540,7 @@ static void NWShowDetailList(void) {
     UIView *topBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, gScrW, topH)];
     topBar.backgroundColor = [UIColor secondarySystemBackgroundColor];
     UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, gScrW - 32, topH)];
-    tl.text = [NSString stringWithFormat:@"Network Logger (%lu)", (unsigned long)gRequests.count];
+    tl.text = [NSString stringWithFormat:@"网络日志 (%lu)", (unsigned long)gRequests.count];
     tl.font = [UIFont boldSystemFontOfSize:16];
     tl.textColor = [UIColor labelColor];
     tl.textAlignment = NSTextAlignmentCenter;
@@ -525,31 +548,47 @@ static void NWShowDetailList(void) {
     helper.titleLabel = tl;
     [container addSubview:topBar];
 
+    // 搜索栏
+    UISearchBar *searchBar = [[UISearchBar alloc] initWithFrame:CGRectMake(0, topH, gScrW, 44)];
+    searchBar.placeholder = @"搜索 URL / 方法 / 响应内容...";
+    searchBar.delegate = helper;
+    searchBar.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    searchBar.autocorrectionType = UITextAutocorrectionTypeNo;
+    searchBar.barTintColor = [UIColor systemBackgroundColor];
+    searchBar.searchTextField.backgroundColor = [UIColor tertiarySystemBackgroundColor];
+    [container addSubview:searchBar];
+    helper.searchBar = searchBar;
+
+    CGFloat searchH = 44;
     CGFloat bottomH = 50 + safeBottom;
-    UITableView *tbl = [[UITableView alloc] initWithFrame:CGRectMake(0, topH, gScrW, cH - topH - bottomH) style:UITableViewStylePlain];
+    UITableView *tbl = [[UITableView alloc] initWithFrame:CGRectMake(0, topH + searchH, gScrW, cH - topH - searchH - bottomH) style:UITableViewStylePlain];
     tbl.dataSource = helper; tbl.delegate = helper;
     tbl.rowHeight = UITableViewAutomaticDimension; tbl.estimatedRowHeight = 60;
     [container addSubview:tbl];
     helper.tableView = tbl;
 
-    // Bottom bar with 3 buttons
+    // 底部按钮栏（5个按钮）
     UIView *bottomBar = [[UIView alloc] initWithFrame:CGRectMake(0, cH - bottomH, gScrW, bottomH)];
     bottomBar.backgroundColor = [UIColor secondarySystemBackgroundColor];
 
+    CGFloat btnW = (gScrW - 50) / 5;
+
     UIButton *clearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    clearBtn.frame = CGRectMake(10, safeBottom, 70, 40);
-    [clearBtn setTitle:@"Clear" forState:UIControlStateNormal];
-    clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    clearBtn.frame = CGRectMake(8, safeBottom, btnW, 40);
+    [clearBtn setTitle:@"清空" forState:UIControlStateNormal];
+    clearBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
     clearBtn.backgroundColor = [UIColor systemRedColor];
     [clearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     clearBtn.layer.cornerRadius = 8;
-    [clearBtn addTarget:NWSafeTarget(^{ [gRequests removeAllObjects]; tl.text = @"Network Logger (0)"; [helper.tableView reloadData]; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [clearBtn addTarget:NWSafeTarget(^{ [gRequests removeAllObjects];
+        helper.isFiltering = NO; [helper.filteredData removeAllObjects];
+        tl.text = @"网络日志 (0)"; [helper.tableView reloadData]; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [bottomBar addSubview:clearBtn];
 
     UIButton *subBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    subBtn.frame = CGRectMake(90, safeBottom, 70, 40);
-    [subBtn setTitle:@"Sub" forState:UIControlStateNormal];
-    subBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    subBtn.frame = CGRectMake(8 + (btnW + 8) * 1, safeBottom, btnW, 40);
+    [subBtn setTitle:@"子进程" forState:UIControlStateNormal];
+    subBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
     subBtn.backgroundColor = [UIColor systemOrangeColor];
     [subBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     subBtn.layer.cornerRadius = 8;
@@ -557,19 +596,29 @@ static void NWShowDetailList(void) {
     [bottomBar addSubview:subBtn];
 
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(170, safeBottom, 70, 40);
-    [copyBtn setTitle:@"Copy" forState:UIControlStateNormal];
-    copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    copyBtn.frame = CGRectMake(8 + (btnW + 8) * 2, safeBottom, btnW, 40);
+    [copyBtn setTitle:@"复制" forState:UIControlStateNormal];
+    copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
     copyBtn.backgroundColor = [UIColor systemBlueColor];
     [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     copyBtn.layer.cornerRadius = 8;
     [copyBtn addTarget:NWSafeTarget(^{ NWCopyAllLogs(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [bottomBar addSubview:copyBtn];
 
+    UIButton *uploadBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    uploadBtn.frame = CGRectMake(8 + (btnW + 8) * 3, safeBottom, btnW, 40);
+    [uploadBtn setTitle:@"上传" forState:UIControlStateNormal];
+    uploadBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    uploadBtn.backgroundColor = [UIColor systemGreenColor];
+    [uploadBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    uploadBtn.layer.cornerRadius = 8;
+    [uploadBtn addTarget:NWSafeTarget(^{ NWUploadLogs(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomBar addSubview:uploadBtn];
+
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(250, safeBottom, 70, 40);
-    [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
-    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    closeBtn.frame = CGRectMake(8 + (btnW + 8) * 4, safeBottom, btnW, 40);
+    [closeBtn setTitle:@"关闭" forState:UIControlStateNormal];
+    closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
     closeBtn.backgroundColor = [UIColor systemGrayColor];
     [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     closeBtn.layer.cornerRadius = 8;
@@ -586,7 +635,7 @@ static void NWShowDetailList(void) {
 static void NWShowSubLog(void) {
     NSString *content = [NSString stringWithContentsOfFile:gSubLogPath() encoding:NSUTF8StringEncoding error:nil];
     if (!content || content.length == 0) {
-        content = @"No subprocess log found.\n\nThe target app might not use Process/NSTask,\nor DYLD_INSERT_LIBRARIES was blocked.";
+        content = @"未找到子进程日志。\n\n目标应用可能未使用 Process/NSTask，\n或 DYLD_INSERT_LIBRARIES 被阻止。";
     }
 
     UIWindowScene *scene = nil;
@@ -614,8 +663,8 @@ static void NWShowSubLog(void) {
     bottomNav.backgroundColor = [UIColor secondarySystemBackgroundColor];
 
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(gScrW / 2 - 110, 34, 100, 40);
-    [copyBtn setTitle:@"Copy" forState:UIControlStateNormal];
+    copyBtn.frame = CGRectMake(gScrW / 2 - 130, 34, 120, 40);
+    [copyBtn setTitle:@"复制日志" forState:UIControlStateNormal];
     copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     copyBtn.backgroundColor = [UIColor systemBlueColor];
     [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -623,7 +672,7 @@ static void NWShowSubLog(void) {
     [copyBtn addTarget:NWSafeTarget(^{
         UIPasteboard.generalPasteboard.string = content;
         UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(gScrW/2 - 50, gScrH/2, 100, 36)];
-        toast.text = @"Copied!"; toast.textAlignment = NSTextAlignmentCenter;
+        toast.text = @"已复制!"; toast.textAlignment = NSTextAlignmentCenter;
         toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.8];
         toast.textColor = [UIColor whiteColor]; toast.layer.cornerRadius = 8; toast.clipsToBounds = YES;
         [win addSubview:toast];
@@ -631,9 +680,21 @@ static void NWShowSubLog(void) {
     }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [bottomNav addSubview:copyBtn];
 
+    UIButton *uploadBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    uploadBtn.frame = CGRectMake(gScrW / 2, 34, 120, 40);
+    [uploadBtn setTitle:@"上传日志" forState:UIControlStateNormal];
+    uploadBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    uploadBtn.backgroundColor = [UIColor systemGreenColor];
+    [uploadBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    uploadBtn.layer.cornerRadius = 8;
+    [uploadBtn addTarget:NWSafeTarget(^{
+        NWUploadLogs();
+    }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomNav addSubview:uploadBtn];
+
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(gScrW / 2 + 10, 34, 100, 40);
-    [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
+    closeBtn.frame = CGRectMake(gScrW / 2 + 130, 34, 100, 40);
+    [closeBtn setTitle:@"关闭" forState:UIControlStateNormal];
     closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     closeBtn.backgroundColor = [UIColor systemGrayColor];
     [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -659,14 +720,14 @@ static void NWShowDetail(NWRequest *req) {
     NWRetainObj(win);
 
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"=== REQUEST ===\n"];
+    [text appendFormat:@"=== 请求 ===\n"];
     [text appendFormat:@"%@ %@\n", req.method, req.url];
-    [text appendFormat:@"Time: %@ (%.0fms)\n\n", req.timestamp, req.duration];
-    if (req.requestHeaders.count > 0) { [text appendString:@"-- Req Headers --\n"]; for (NSString *k in req.requestHeaders) [text appendFormat:@"%@: %@\n", k, req.requestHeaders[k]]; [text appendString:@"\n"]; }
-    if (req.requestBody.length > 0) { [text appendFormat:@"-- Req Body --\n%@\n\n", req.requestBody]; }
-    [text appendFormat:@"=== RESPONSE %ld ===\n\n", (long)req.statusCode];
-    if (req.responseHeaders.count > 0) { [text appendString:@"-- Resp Headers --\n"]; for (NSString *k in req.responseHeaders) [text appendFormat:@"%@: %@\n", k, req.responseHeaders[k]]; [text appendString:@"\n"]; }
-    if (req.responseBody.length > 0) { [text appendString:@"-- Resp Body --\n"]; [text appendString:req.responseBody]; }
+    [text appendFormat:@"时间: %@ (%.0fms)\n\n", req.timestamp, req.duration];
+    if (req.requestHeaders.count > 0) { [text appendString:@"-- 请求头 --\n"]; for (NSString *k in req.requestHeaders) [text appendFormat:@"%@: %@\n", k, req.requestHeaders[k]]; [text appendString:@"\n"]; }
+    if (req.requestBody.length > 0) { [text appendFormat:@"-- 请求体 --\n%@\n\n", req.requestBody]; }
+    [text appendFormat:@"=== 响应 %ld ===\n\n", (long)req.statusCode];
+    if (req.responseHeaders.count > 0) { [text appendString:@"-- 响应头 --\n"]; for (NSString *k in req.responseHeaders) [text appendFormat:@"%@: %@\n", k, req.responseHeaders[k]]; [text appendString:@"\n"]; }
+    if (req.responseBody.length > 0) { [text appendString:@"-- 响应体 --\n"]; [text appendString:req.responseBody]; }
 
     UITextView *tv = [[UITextView alloc] initWithFrame:CGRectMake(0, 0, gScrW, gScrH - 90)];
     tv.editable = NO;
@@ -682,7 +743,7 @@ static void NWShowDetail(NWRequest *req) {
 
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     copyBtn.frame = CGRectMake(gScrW / 2 - 110, 34, 100, 40);
-    [copyBtn setTitle:@"Copy" forState:UIControlStateNormal];
+    [copyBtn setTitle:@"复制" forState:UIControlStateNormal];
     copyBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     copyBtn.backgroundColor = [UIColor systemBlueColor];
     [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -694,7 +755,7 @@ static void NWShowDetail(NWRequest *req) {
 
     UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     closeBtn.frame = CGRectMake(gScrW / 2 + 10, 34, 100, 40);
-    [closeBtn setTitle:@"Close" forState:UIControlStateNormal];
+    [closeBtn setTitle:@"关闭" forState:UIControlStateNormal];
     closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     closeBtn.backgroundColor = [UIColor systemGrayColor];
     [closeBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -704,26 +765,88 @@ static void NWShowDetail(NWRequest *req) {
     [win addSubview:bottomNav];
 }
 
+#pragma mark - 上传日志到 log.lengye.top
+
+static void NWUploadLogs(void) {
+    NSMutableString *text = [NSMutableString string];
+    [text appendFormat:@"NetworkLogger v4 - 主进程: %lu 个请求\n设备: %@ | 系统: %@\n\n",
+        (unsigned long)gRequests.count, [[UIDevice currentDevice] model], [[UIDevice currentDevice] systemVersion]];
+
+    for (NSUInteger i = 0; i < gRequests.count; i++) {
+        NWRequest *r = gRequests[i];
+        [text appendFormat:@"=== 请求 #%lu ===\n", (unsigned long)(i+1)];
+        [text appendFormat:@"%@ %@ [%ld] (%.0fms)\n", r.method, r.url, (long)r.statusCode, r.duration];
+        [text appendFormat:@"时间: %@\n", r.timestamp];
+        if (r.requestHeaders.count > 0) { [text appendString:@"请求头:\n"]; for (NSString *k in r.requestHeaders) [text appendFormat:@"  %@: %@\n", k, r.requestHeaders[k]]; }
+        if (r.requestBody.length > 0) [text appendFormat:@"请求体: %@\n", r.requestBody];
+        if (r.responseHeaders.count > 0) { [text appendString:@"响应头:\n"]; for (NSString *k in r.responseHeaders) [text appendFormat:@"  %@: %@\n", k, r.responseHeaders[k]]; }
+        if (r.responseBody.length > 0) [text appendFormat:@"响应体: %@\n", r.responseBody];
+        [text appendString:@"\n"];
+    }
+
+    // 追加子进程日志
+    NSString *subLog = [NSString stringWithContentsOfFile:gSubLogPath() encoding:NSUTF8StringEncoding error:nil];
+    if (subLog.length > 0) {
+        [text appendString:@"=== 子进程日志 ===\n"];
+        [text appendString:subLog];
+    }
+
+    NSURL *uploadURL = [NSURL URLWithString:@"https://log.lengye.top"];
+    NSMutableURLRequest *uploadReq = [NSMutableURLRequest requestWithURL:uploadURL];
+    uploadReq.HTTPMethod = @"POST";
+    [uploadReq setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+    [uploadReq setValue:@"NetworkLogger-iOS" forHTTPHeaderField:@"User-Agent"];
+    uploadReq.HTTPBody = [text dataUsingEncoding:NSUTF8StringEncoding];
+
+    UIWindowScene *scene = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+        if ([s isKindOfClass:[UIWindowScene class]]) { scene = (UIWindowScene *)s; break; }
+
+    // 显示"上传中"提示
+    __block UIWindow *tw = [[UIWindow alloc] initWithWindowScene:scene];
+    tw.windowLevel = UIWindowLevelAlert + 400;
+    tw.frame = [UIScreen mainScreen].bounds; tw.hidden = NO;
+    UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(gScrW/2 - 80, gScrH/2, 160, 44)];
+    toast.text = @"⏫ 上传中...";
+    toast.textAlignment = NSTextAlignmentCenter;
+    toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+    toast.textColor = [UIColor whiteColor]; toast.layer.cornerRadius = 12; toast.clipsToBounds = YES;
+    [tw addSubview:toast];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:uploadReq completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            if (error) {
+                toast.text = [NSString stringWithFormat:@"❌ 上传失败: %@", error.localizedDescription];
+            } else if (httpResp.statusCode >= 200 && httpResp.statusCode < 400) {
+                toast.text = [NSString stringWithFormat:@"✅ 上传成功 (%lu 条)", (unsigned long)gRequests.count];
+            } else {
+                toast.text = [NSString stringWithFormat:@"❌ 服务器错误: %ld", (long)httpResp.statusCode];
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ tw.hidden = YES; });
+        });
+    }] resume];
+}
+
 #pragma mark - Copy All
 
 static void NWCopyAllLogs(void) {
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"NetworkLogger v4 - Main Process: %lu requests\nDevice: %@ | OS: %@\n\n",
+    [text appendFormat:@"NetworkLogger v4 - 主进程: %lu 个请求\n设备: %@ | 系统: %@\n\n",
         (unsigned long)gRequests.count, [[UIDevice currentDevice] model], [[UIDevice currentDevice] systemVersion]];
 
     for (NSUInteger i = 0; i < gRequests.count; i++) {
         NWRequest *r = gRequests[i];
         [text appendFormat:@"#%lu %@ %@ [%ld] (%.0fms)\n", (unsigned long)(i+1), r.method, r.url, (long)r.statusCode, r.duration];
-        if (r.requestHeaders.count > 0) { [text appendString:@"  ReqH: "]; for (NSString *k in r.requestHeaders) [text appendFormat:@"%@=%@ ", k, r.requestHeaders[k]]; [text appendString:@"\n"]; }
-        if (r.responseHeaders.count > 0) { [text appendString:@"  RespH: "]; for (NSString *k in r.responseHeaders) [text appendFormat:@"%@=%@ ", k, r.responseHeaders[k]]; [text appendString:@"\n"]; }
-        if (r.responseBody.length > 0) [text appendFormat:@"  RespB: %@\n", r.responseBody];
+        if (r.requestHeaders.count > 0) { [text appendString:@"  请求头: "]; for (NSString *k in r.requestHeaders) [text appendFormat:@"%@=%@ ", k, r.requestHeaders[k]]; [text appendString:@"\n"]; }
+        if (r.responseHeaders.count > 0) { [text appendString:@"  响应头: "]; for (NSString *k in r.responseHeaders) [text appendFormat:@"%@=%@ ", k, r.responseHeaders[k]]; [text appendString:@"\n"]; }
+        if (r.responseBody.length > 0) [text appendFormat:@"  响应体: %@\n", r.responseBody];
         [text appendString:@"\n"];
     }
 
-    // Append subprocess log if exists
     NSString *subLog = [NSString stringWithContentsOfFile:gSubLogPath() encoding:NSUTF8StringEncoding error:nil];
     if (subLog.length > 0) {
-        [text appendString:@"=== SUBPROCESS LOG ===\n"];
+        [text appendString:@"=== 子进程日志 ===\n"];
         [text appendString:subLog];
     }
 
@@ -736,7 +859,7 @@ static void NWCopyAllLogs(void) {
     tw.windowLevel = UIWindowLevelAlert + 400;
     tw.frame = [UIScreen mainScreen].bounds; tw.hidden = NO;
     UILabel *toast = [[UILabel alloc] initWithFrame:CGRectMake(gScrW/2 - 100, gScrH/2, 200, 44)];
-    toast.text = [NSString stringWithFormat:@"Copied %lu!", (unsigned long)gRequests.count];
+    toast.text = [NSString stringWithFormat:@"已复制 %lu 条!", (unsigned long)gRequests.count];
     toast.textAlignment = NSTextAlignmentCenter;
     toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
     toast.textColor = [UIColor whiteColor]; toast.layer.cornerRadius = 12; toast.clipsToBounds = YES;
@@ -750,21 +873,17 @@ __attribute__((constructor))
 static void NWLoggerInit(void) {
     gRequests = [NSMutableArray new];
 
-    // Network hooks (work in both UI and subprocess mode)
     [NSURLProtocol registerClass:[NWLogProtocol class]];
     NWSwizzleSession();
-    NWSwizzleTasks();  // VPN-safe fallback: intercept at task creation level
+    NWSwizzleTasks();
 
     if (NWHasUIKit()) {
-        // === UI PROCESS MODE ===
-        NSLog(@"[NetworkLogger] v4 - UI mode");
-        // Note: Process hook disabled - DYLD_INSERT_LIBRARIES breaks some subprocesses
+        NSLog(@"[NetworkLogger] v4 - UI 模式");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             NWCreateBadge();
         });
     } else {
-        // === SUBPROCESS MODE ===
         gIsSubprocess = YES;
-        NSLog(@"[NetworkLogger] v4 - Subprocess mode, logging to %@", gSubLogPath());
+        NSLog(@"[NetworkLogger] v4 - 子进程模式，日志写入 %@", gSubLogPath());
     }
 }
