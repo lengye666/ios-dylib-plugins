@@ -67,6 +67,7 @@ static void NWAddRequest(NWRequest *e) {
     if (!gCapturing) return; // 未开启抓包则不记录
     [gRequests addObject:e];
 }
+static void NWShowDetailList(void);
 static void NWShowSubLog(void);
 static void NWCopyAllLogs(void);
 static void NWUploadLogs(void);
