@@ -6,6 +6,7 @@
 
 // ==========================================
 // NetworkLogger v4 - 全量拦截 + 搜索 / 汉化 / 上传
+// 默认关闭抓包，手动开启
 // ==========================================
 
 #pragma mark - Block Target Wrapper
@@ -56,12 +57,16 @@ static NSMutableArray<NWRequest *> *gRequests;
 static UIWindow *gFloatWin;
 static CGFloat gScrW, gScrH;
 static BOOL gIsSubprocess = NO;
+static BOOL gCapturing = NO; // 默认关闭抓包
 
 static NSString *gSubLogPath(void) {
     return @"/var/mobile/Documents/NW_subprocess.log";
 }
 
-static void NWShowDetailList(void);
+static void NWAddRequest(NWRequest *e) {
+    if (!gCapturing) return; // 未开启抓包则不记录
+    [gRequests addObject:e];
+}
 static void NWShowSubLog(void);
 static void NWCopyAllLogs(void);
 static void NWUploadLogs(void);
@@ -164,7 +169,7 @@ static void NWWriteSubLog(NSString *line) {
             e.requestBody = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
             if (!e.requestBody) e.requestBody = @"[二进制]";
         }
-        [gRequests addObject:e];
+        NWAddRequest(e);
     }
 
     [self.client URLProtocol:self didReceiveResponse:resp cacheStoragePolicy:NSURLCacheStorageNotAllowed];
@@ -279,7 +284,7 @@ static void NWSwizzleTasks(void) {
                         e.responseBody = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"[二进制]";
                     }
                     if (err) e.responseBody = [NSString stringWithFormat:@"[错误] %@", err.localizedDescription];
-                    [gRequests addObject:e];
+                    NWAddRequest(e);
                 }
 
                 if (origCompletion) origCompletion(data, resp, err);
@@ -483,13 +488,21 @@ static void NWCreateBadge(void) {
     gFloatWin.frame = CGRectMake(gScrW - sz - 8, 50, sz, sz);
     gFloatWin.layer.cornerRadius = sz / 2;
 
+    // 切换抓包状态的函数（不删旧记录）
+    static void (^toggleCapture)(void) = ^{
+        gCapturing = !gCapturing;
+    };
+    NWRetainObj(toggleCapture);
+
     gBadge = [UIButton buttonWithType:UIButtonTypeCustom];
     gBadge.frame = gFloatWin.bounds;
-    gBadge.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.9];
     gBadge.layer.cornerRadius = sz / 2;
     gBadge.titleLabel.font = [UIFont boldSystemFontOfSize:11];
-    [gBadge setTitle:@"📡 0" forState:UIControlStateNormal];
     [gBadge setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+
+    // 初始状态：灰色 = 关闭
+    gBadge.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.9];
+    [gBadge setTitle:@"⏹ 关闭" forState:UIControlStateNormal];
 
     NWDragHandler *dh = [NWDragHandler new];
     dh.window = gFloatWin; dh.btnSize = CGSizeMake(sz, sz);
@@ -497,15 +510,31 @@ static void NWCreateBadge(void) {
     [gBadge addGestureRecognizer:pan];
     NWRetainObj(dh);
 
-    [gBadge addTarget:NWSafeTarget(^{ NWShowDetailList(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    // 单击 = 切换抓包
+    [gBadge addTarget:NWSafeTarget(^{
+        toggleCapture();
+    }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+
+    // 长按 = 查看列表
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:NWSafeTarget(^{
+        if (gCapturing) { NWShowDetailList(); }
+    }) action:@selector(fire)];
+    [gBadge addGestureRecognizer:longPress];
+
     [gFloatWin addSubview:gBadge];
 
     [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
-        NSString *title = [NSString stringWithFormat:@"📡 %lu", (unsigned long)gRequests.count];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:gSubLogPath()]) {
-            title = [title stringByAppendingString:@" ⭐"];
+        if (gCapturing) {
+            gBadge.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.9];
+            NSString *title = [NSString stringWithFormat:@"🔴 %lu", (unsigned long)gRequests.count];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:gSubLogPath()]) {
+                title = [title stringByAppendingString:@" ⭐"];
+            }
+            [gBadge setTitle:title forState:UIControlStateNormal];
+        } else {
+            gBadge.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.9];
+            [gBadge setTitle:[NSString stringWithFormat:@"⏹ %lu", (unsigned long)gRequests.count] forState:UIControlStateNormal];
         }
-        [gBadge setTitle:title forState:UIControlStateNormal];
     }];
 }
 
