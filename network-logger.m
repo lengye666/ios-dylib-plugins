@@ -489,21 +489,13 @@ static void NWCreateBadge(void) {
     gFloatWin.frame = CGRectMake(gScrW - sz - 8, 50, sz, sz);
     gFloatWin.layer.cornerRadius = sz / 2;
 
-    // 切换抓包状态的函数（不删旧记录）
-    static void (^toggleCapture)(void) = ^{
-        gCapturing = !gCapturing;
-    };
-    NWRetainObj(toggleCapture);
-
     gBadge = [UIButton buttonWithType:UIButtonTypeCustom];
     gBadge.frame = gFloatWin.bounds;
+    gBadge.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.9];
     gBadge.layer.cornerRadius = sz / 2;
     gBadge.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+    [gBadge setTitle:@"📡 0" forState:UIControlStateNormal];
     [gBadge setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-
-    // 初始状态：灰色 = 关闭
-    gBadge.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.9];
-    [gBadge setTitle:@"⏹ 关闭" forState:UIControlStateNormal];
 
     NWDragHandler *dh = [NWDragHandler new];
     dh.window = gFloatWin; dh.btnSize = CGSizeMake(sz, sz);
@@ -511,31 +503,15 @@ static void NWCreateBadge(void) {
     [gBadge addGestureRecognizer:pan];
     NWRetainObj(dh);
 
-    // 单击 = 切换抓包
-    [gBadge addTarget:NWSafeTarget(^{
-        toggleCapture();
-    }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-
-    // 长按 = 查看列表
-    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:NWSafeTarget(^{
-        if (gCapturing) { NWShowDetailList(); }
-    }) action:@selector(fire)];
-    [gBadge addGestureRecognizer:longPress];
-
+    [gBadge addTarget:NWSafeTarget(^{ NWShowDetailList(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [gFloatWin addSubview:gBadge];
 
     [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
-        if (gCapturing) {
-            gBadge.backgroundColor = [[UIColor systemRedColor] colorWithAlphaComponent:0.9];
-            NSString *title = [NSString stringWithFormat:@"🔴 %lu", (unsigned long)gRequests.count];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:gSubLogPath()]) {
-                title = [title stringByAppendingString:@" ⭐"];
-            }
-            [gBadge setTitle:title forState:UIControlStateNormal];
-        } else {
-            gBadge.backgroundColor = [[UIColor systemGrayColor] colorWithAlphaComponent:0.9];
-            [gBadge setTitle:[NSString stringWithFormat:@"⏹ %lu", (unsigned long)gRequests.count] forState:UIControlStateNormal];
+        NSString *title = [NSString stringWithFormat:@"📡 %lu", (unsigned long)gRequests.count];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:gSubLogPath()]) {
+            title = [title stringByAppendingString:@" ⭐"];
         }
+        [gBadge setTitle:title forState:UIControlStateNormal];
     }];
 }
 
@@ -615,15 +591,31 @@ static void NWShowDetailList(void) {
         tl.text = @"网络日志 (0)"; [helper.tableView reloadData]; }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
     [bottomBar addSubview:clearBtn];
 
-    UIButton *subBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    subBtn.frame = CGRectMake(8 + (btnW + 8) * 1, safeBottom, btnW, 40);
-    [subBtn setTitle:@"子进程" forState:UIControlStateNormal];
-    subBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    subBtn.backgroundColor = [UIColor systemOrangeColor];
-    [subBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    subBtn.layer.cornerRadius = 8;
-    [subBtn addTarget:NWSafeTarget(^{ NWShowSubLog(); }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
-    [bottomBar addSubview:subBtn];
+    UIButton *capBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    capBtn.frame = CGRectMake(8 + (btnW + 8) * 1, safeBottom, btnW, 40);
+    capBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    capBtn.layer.cornerRadius = 8;
+    [capBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    // 根据当前状态设置按钮样式
+    if (gCapturing) {
+        capBtn.backgroundColor = [UIColor systemRedColor];
+        [capBtn setTitle:@"⏹ 停止" forState:UIControlStateNormal];
+    } else {
+        capBtn.backgroundColor = [UIColor systemGreenColor];
+        [capBtn setTitle:@"▶ 抓包" forState:UIControlStateNormal];
+    }
+    [capBtn addTarget:NWSafeTarget(^{
+        gCapturing = !gCapturing;
+        // 更新按钮样式
+        if (gCapturing) {
+            capBtn.backgroundColor = [UIColor systemRedColor];
+            [capBtn setTitle:@"⏹ 停止" forState:UIControlStateNormal];
+        } else {
+            capBtn.backgroundColor = [UIColor systemGreenColor];
+            [capBtn setTitle:@"▶ 抓包" forState:UIControlStateNormal];
+        }
+    }) action:@selector(fire) forControlEvents:UIControlEventTouchUpInside];
+    [bottomBar addSubview:capBtn];
 
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     copyBtn.frame = CGRectMake(8 + (btnW + 8) * 2, safeBottom, btnW, 40);
