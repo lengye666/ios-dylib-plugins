@@ -57,7 +57,7 @@ static NSMutableArray<NWRequest *> *gRequests;
 static UIWindow *gFloatWin;
 static CGFloat gScrW, gScrH;
 static BOOL gIsSubprocess = NO;
-static BOOL gCapturing = NO; // 默认关闭抓包
+static BOOL gCapturing = YES; // 默认开启抓包
 
 static NSString *gSubLogPath(void) {
     return @"/var/mobile/Documents/NW_subprocess.log";
